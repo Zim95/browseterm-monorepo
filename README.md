@@ -19,6 +19,9 @@ $ git clone <>
         1.2.2 Setting up an already existing config
     1.3 Setting up MetalLB for Ingress IP
     1.4 Setting up External NFS
+        1.4.1 Setting up NFS on Mac
+        1.4.2 Testing the NFS server with CLI
+        1.4.3 Testing the NFS server with Kubernetes API
 2. Deploying our MicroServices
     2.1 Deploying Container Maker
     2.2 Deploying Cert Manager
@@ -384,3 +387,109 @@ If you already have an existing kubernetes cluster, you should have a kube confi
     ```
 
 7. Now you are in the cluster. You can call it whatever you want. I call it multipass-cluster.
+
+
+## 1.4 Setting up NFS
+Here we will be setting up NFS server on our Mac, then mount to it from within the kubernetes cluster. Mounting will be done with CLI tools as well as Python Code by creating Persistent Volumes and Persistent Volume Claims.
+
+### 1.4.1 Setting up NFS on Mac
+There were a lot of issues but we will not cover those here, we will only put what worked in here for documentation purposes.
+We already have an NFS server on a Mac, we only need to configure it.
+
+1. We need to create a directory where the files will be stored.
+    ```bash
+    $ mkdir -p /User/Shared/<nfs-directory>
+    ```
+    Then change the owner to yourself
+    ```bash
+    $ sudo chown -R $(whoami) /User/Shared/<nfs-directory>
+    ```
+
+2. Next, we will need to create an export rule that accepts requests from IPAddresses to this directory. All of these rules are stored in the `/etc/exports` file. We need to edit that file.
+    ```bash
+    sudo vim /etc/exports
+    ```
+    Here we will need to add this line
+    ```
+    /Users/Shared/nfs-share-container-maker -alldirs -mapall=<userid>:<usergroup> <ip-k3s-node> <ip-k3s-agent-1> <ip-k3s-agent-1> <ip-k3s-agent-1>
+    ```
+    We need to add the IP addresses of our multipass nodes, so that we allow requests from our cluster to this NFS Server.
+    We can get the ips using `multipass list`. The ips are the ones that start have this format `192.168.xx.x`.
+    You can check the user id with `id -u` and user group with `id -g`.
+
+3. After this, save the file and restart the nfs server.
+    ```bash
+    sudo nfsd restart
+    ```
+
+    Then type this command:
+    ```bash
+    sudo nfsd checkexports
+    ```
+    This command should output nothing. You should not get any errors upon hitting this command, if you do, you need to resolve those. An example error I got was:
+    ```
+    getaddrinfo() failed for 192.168.64.*
+    exports:1: couldn't get address for host: 192.168.64.*
+    exports:1: no valid hosts found for export
+    ```
+    This was because I did not set the IP addresses correctly. Mac NFS does not support wildcards or special characters, every IP address had to be completely added. After that I got no errors.
+    This command should then printed nothing, which meant it worked.
+
+    Then hit this command:
+    ```bash
+    showmount -e localhost
+    ```
+    This should show our rule:
+    ```bash
+    Exports list on localhost:
+    /Users/Shared/nfs-share-container-maker 192.168.64.2 192.168.64.3 192.168.64.4 192.168.64.5
+    ```
+    If it doesn't show this, you need to resolve it. This rule should show up as our exports rule. It only works after that.
+
+### 1.4.2 Testing the NFS server with CLI
+Here we will create a dummy Kubernetes Pod and then try to mount to our external NFS from there.
+
+1. Start a dummy pod.
+    ```bash
+    kubectl run nfs-test \
+    --rm -it --restart=Never \
+    --image=alpine \
+    --overrides='
+    {
+        "spec": {
+            "hostNetwork": true,
+            "containers": [{
+            "name": "nfs",
+            "image": "alpine",
+            "stdin": true,
+            "tty": true,
+            "securityContext": {
+                "privileged": true
+            },
+            "command": ["/bin/sh"]
+            }]
+        }
+    }'
+    If you don't see a command prompt, try pressing enter.
+    / #
+    ```
+    Wait for some time until you see the command prompt, or like the instruction says, press enter.
+
+2. Then add `nfs-utils`.
+    ```bash
+    apk add nfs-utils
+    ```
+
+3. Create the directory that will be mounted to the NFS.
+    ```bash
+    mkdir /mnt/nfs
+    ```
+
+4. Mount to the NFS. We have a lot of other options to do this but none of them work. Only this works:
+    ```bash
+    mount -o vers=3,nolock <MACIP>:/Users/Shared/nfs-share-container-maker /mnt/nfs
+    ```
+    To the MACIP: `ipconfig getifaddr en0`
+    If you get Permission denied, try checking your firewall. NFS server listens on some ports. These ports might have been blocked by the firewall. Or you might be trying some incorrect protocol.
+
+### 1.4.3 Testing the NFS server with Kubernetes API
