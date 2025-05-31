@@ -1,7 +1,30 @@
-# BROWSETERM MONO REPO
-This repository holds the complete browseterm project. This respository is a collection of all the other repositories that add up to become Browseterm.
+# BROWSETERM
+Browseterm is a project that allows users to run linux containers in the browser. The user can create and run different linux terminals and interact with them in the browser. Look at the demo:
+<add a gif>
 
-To get start clone this repo:
+Payment plans:
+--------------
+1. Free tier: One container per user.
+2. Developer tier: Unlimited containers.
+3. Enterprise tier: Unlimited containers. Grow storage size and memory size. (Coming soon later).
+
+This repository holds the complete browseterm project. This respository is a collection of all the other repositories that add up to become Browseterm.
+Here are all the services that browseterm has:
+1. Container Maker:
+    Responsible for managing containers in the kubernetes cluster. Create, Get, List, Delete containers in the kubernetes cluster.
+2. Cert Manager:
+    Responsible for managing certificates for all our microservices. Refreshes certificates every Sunday.
+    NOTE: Needs a sidecar to create new deployments of the containers once the certificates have been refreshed.
+3. Socket SSH:
+    The websocket interface for containers created by the user. This will be dynamically created by our system when user connects to the container from the UI. However, we deploy a development instance for testing the code. The image is then pushed and is created dynamically as required by teh system.
+4. Postgres HA Cluster:
+    Our database. Prioritizes consistency since we have a lot of payment data. A combination of: ETCD, Patroni, HAProxy, Postgres Cluster, PGBackRest.
+5. Browseterm server:
+    - Renders templates.
+    - Handles Authentication.
+    - Acts like an API Gateway.
+
+To get started, clone this repo:
 ```bash
 $ git clone <>
 ```
@@ -17,11 +40,15 @@ $ git clone <>
     1.2 Setting up our cluster with kubectl
         1.2.1 Setting up a new config
         1.2.2 Setting up an already existing config
-    1.3 Setting up MetalLB for Ingress IP
+    1.3 Setting up Ingress and MetalLB
+        1.3.1 Installing Ingress Controller
+        1.3.2 Installing Metal LB
     1.4 Setting up External NFS
         1.4.1 Setting up NFS on Mac
         1.4.2 Testing the NFS server with CLI
         1.4.3 Testing the NFS server with Kubernetes API
+    1.5 Setting up LongHorn
+        1.5.1 Setting up LongHorn.
 2. Deploying our MicroServices
     2.1 Deploying Container Maker
     2.2 Deploying Cert Manager
@@ -382,12 +409,124 @@ If you already have an existing kubernetes cluster, you should have a kube confi
     ```
 
 6. Now just switch to this context.
-    ```
+    ```bash
     $ kubectl config use-context multipass-cluster
     ```
 
 7. Now you are in the cluster. You can call it whatever you want. I call it multipass-cluster.
 
+
+## 1.3 Setting up ingress with Metal LB
+How ingresses work in kubernetes is, you need an actual ingress controller like traefik or nginx. We are going to use ingress-nginx. Then you have ingress rules that will write rules to the ingress nginx.
+
+In this section, we are going to install the ingress controller to facilitate creating ingresses in our cluster.
+
+Next, We need external IP. When we're on the cloud it happens automatically, but in our case, we need something to facilitate external IP assignment. To do this we will install MetalLB. So every time we create a LoadBalancer, we get an external IP for it.
+
+### 1.3.1 Setting up Ingress with Nginx Ingress Controller
+We are going to setup the ingress controller.
+
+1. If you don't already have helm installed, do the following:
+    ```bash
+    $ brew update
+    $ brew install helm
+    ```
+    Once done, verify the installation:
+    ```bash
+    $ helm version
+    ```
+    You should see something like this:
+    ```bash
+    version.BuildInfo{Version:"v3.15.2", GitCommit:"1a500d5625419a524fdae4b33de351cc4f58ec35", GitTreeState:"clean", GoVersion:"go1.22.4"}
+    ```
+
+2. Install the ingress controller using `helm`.
+    ```bash
+    $ helm upgrade --install ingress-nginx ingress-nginx --repo https://kubernetes.github.io/ingress-nginx --namespace ingress-nginx --create-namespace
+    ```
+    This will install the ingress controller in the `ingress-nginx` namespace.
+
+    Test this by checking both pods and services:
+    ```bash
+    $ kubectl get pods -n ingress-nginx
+    $ kubectl get services -n ingress-nginx
+    ```
+    For pods, you should see:
+    ```bash
+    NAME                                        READY   STATUS    RESTARTS   AGE
+    ingress-nginx-controller-6885cfc548-c67zz   1/1     Running   0          149m
+    ```
+    For services you should see:
+    ```bash
+    NAME                                 TYPE           CLUSTER-IP      EXTERNAL-IP   PORT(S)                      AGE
+    ingress-nginx-controller             LoadBalancer   10.43.125.107   <pending>     80:30442/TCP,443:30842/TCP   150m
+    ingress-nginx-controller-admission   ClusterIP      10.43.227.192   <none>        443/TCP                      150m
+    ```
+    As you can see, the `ingress-nginx-controller` shows a pending external ip. This is because external ip cannot be assigned yet. For that we need to install MetalLB.
+
+
+### 1.3.2 Installing Metal LB
+Here we will install metal lb for external ip address provisioning.
+
+1. First, lets install metal lb.
+    ```bash
+    $ kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.13.7/config/manifests/metallb-native.yaml
+    ```
+
+2. Wait for metal lb to be ready.
+    ```bash
+    $ kubectl wait --namespace metallb-system --for=condition=ready pod --selector=app=metallb --timeout=90s
+    ```
+
+    Wait for these lines to appear:
+    ```bash
+    pod/controller-5cbffbc46b-z7vgw condition met
+    pod/speaker-92skh condition met
+    pod/speaker-k5tkl condition met
+    pod/speaker-kb4dl condition met
+    pod/speaker-xx8gr condition met
+    ```
+
+3. Next, we need to create an IP Address pool. Adjust the IP range according to the IP of our nodes `192.168.64.x`:
+    ```bash
+    cat <<EOF | kubectl apply -f -
+    apiVersion: metallb.io/v1beta1
+    kind: IPAddressPool
+    metadata:
+    name: first-pool
+    namespace: metallb-system
+    spec:
+    addresses:
+    - 192.168.64.200-192.168.64.250
+    ---
+    apiVersion: metallb.io/v1beta1
+    kind: L2Advertisement
+    metadata:
+    name: l2advertisement
+    namespace: metallb-system
+    spec:
+    ipAddressPools:
+    - first-pool
+    EOF
+    ```
+    You should see this:
+    ```bash
+    ipaddresspool.metallb.io/first-pool created
+    l2advertisement.metallb.io/l2advertisement created
+    ```
+
+    Now check the ingress controller, it should get an external ip.
+
+    ```bash
+    $ kubectl get services -n ingress-nginx
+    ```
+    You should see:
+    ```bash
+    NAME                                 TYPE           CLUSTER-IP      EXTERNAL-IP      PORT(S)                      AGE
+    ingress-nginx-controller             LoadBalancer   10.43.125.107   192.168.64.200   80:30442/TCP,443:30842/TCP   172m
+    ingress-nginx-controller-admission   ClusterIP      10.43.227.192   <none>           443/TCP                      172m
+    ```
+    As you can see, the controller now has an external IP. So our metal Lb has been setup.
 
 ## 1.4 Setting up NFS
 Here we will be setting up NFS server on our Mac, then mount to it from within the kubernetes cluster. Mounting will be done with CLI tools as well as Python Code by creating Persistent Volumes and Persistent Volume Claims.
@@ -492,4 +631,15 @@ Here we will create a dummy Kubernetes Pod and then try to mount to our external
     To the MACIP: `ipconfig getifaddr en0`
     If you get Permission denied, try checking your firewall. NFS server listens on some ports. These ports might have been blocked by the firewall. Or you might be trying some incorrect protocol.
 
+5. After the mount you can try creating a file in your `/mnt/nfs` directory. That file should show up in `/Users/Shared/<nfs-directory>`.
+    ```bash
+    echo "test from pvc" > /mnt/nfs/hello.txt
+    ```
+    This file will exist in `/mnt/nfs` as well as in `/Users/Shared/<nfs-directory>`. The contents will be "test from pvc".
+    Try deleting the pod and create a new one, as soon as you create the pod, this file will be available in that pod.
+
 ### 1.4.3 Testing the NFS server with Kubernetes API
+We will cover this section later while deploying the container maker microservice. So you can ignore this for now.
+
+
+## 1.5 Installing Longhorn
