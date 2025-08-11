@@ -1,0 +1,3 @@
+[submodule "cert-manager"]
+	path = cert-manager
+	url = https://Zim95@github.com/Zim95/cert-manager
