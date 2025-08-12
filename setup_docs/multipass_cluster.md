@@ -12,7 +12,19 @@ We will have one master and 3 worker nodes in our cluster.
 # Table of contents:
 1. Setting up the Multipass Cluster  
     1.1 Setting up Ubuntu VMs  
-
+    1.2 Setting up the Master Node  
+    1.3 Setting up a Worker Node  
+    1.4 Video Resource and Static IP  
+2. Setting up kubectl  
+    2.1 Setting up a new config  
+    2.2 Setting up an already existing config  
+3. Setting up ingress with Metal LB  
+    3.1 Setting up Ingress with Nginx Ingress Controller  
+    3.2 Installing Metal LB  
+4. Setting up NFS  
+    4.1 Setting up NFS on Mac  
+    4.2 Testing the NFS server with CLI  
+    4.3 Setting up our development environment  
 
 
 ## 1. Setting up the MultiPass Cluster
@@ -55,7 +67,7 @@ Name               State             IPv4             Image
 <name>             Running           192.168.xx.x     Ubuntu 24.04 LTS
 ```
 
-### 1.1.2 Setting up the Master Node
+### 1.2 Setting up the Master Node
 Lets launch a VM, install k3s and set it up to be the master node.
 
 1. Launch a VM:
@@ -103,7 +115,7 @@ Lets launch a VM, install k3s and set it up to be the master node.
 
 7. Note the IP Address and this token. We will need it while creating worker nodes.
 
-### 1.1.3 Setting up a Worker Node
+### 1.3 Setting up a Worker Node
 Lets launch a VM, install k3s, install k3s agent, pass the IP Adress and token.
 
 1. Launch a VM:
@@ -181,12 +193,12 @@ Lets launch a VM, install k3s, install k3s agent, pass the IP Adress and token.
     Our cluster is ready.
 
 
-### 1.1.4 Video Resource and Static IP
+### 1.4 Video Resource and Static IP
 We can refer to this video for the setup: https://www.youtube.com/watch?v=NZTQ8zdN6PY
 At the end of this video, we get to see how static IPs are important for this cluster setup and what to do if the IP addresses change. We can follow that.
 
 
-## 1.2 Setting up Kubectl
+## 2. Setting up Kubectl
 1. Make sure `kubectl` is installed and functional. If you don't have it then do this:
     ```bash
     $ brew install kubectl
@@ -287,7 +299,7 @@ At the end of this video, we get to see how static IPs are important for this cl
         client-key-data: <client-key-token>
     ```
 
-### 1.2.1 Setting up a new config.
+### 2.1 Setting up a new config.
 If you DO NOT HAVE AN EXISTING kubernetes config file, follow this guide.
 
 1. To know if you have the kubernetes config file, type this:
@@ -313,7 +325,7 @@ If you DO NOT HAVE AN EXISTING kubernetes config file, follow this guide.
     $ kubectl config get-contexts -o name  # list the names of all the contexts.
     ```
 
-### 1.2.2 Setting up an already existing config
+### 2.2 Setting up an already existing config
 If you already have an existing kubernetes cluster, you should have a kube config file.
 
 1. To know if you have the kubernetes config file, type this:
@@ -356,14 +368,14 @@ If you already have an existing kubernetes cluster, you should have a kube confi
 7. Now you are in the cluster. You can call it whatever you want. I call it multipass-cluster.
 
 
-## 1.3 Setting up ingress with Metal LB
+## 3. Setting up ingress with Metal LB
 How ingresses work in kubernetes is, you need an actual ingress controller like traefik or nginx. We are going to use ingress-nginx. Then you have ingress rules that will write rules to the ingress nginx.
 
 In this section, we are going to install the ingress controller to facilitate creating ingresses in our cluster.
 
 Next, We need external IP. When we're on the cloud it happens automatically, but in our case, we need something to facilitate external IP assignment. To do this we will install MetalLB. So every time we create a LoadBalancer, we get an external IP for it.
 
-### 1.3.1 Setting up Ingress with Nginx Ingress Controller
+### 3.1 Setting up Ingress with Nginx Ingress Controller
 We are going to setup the ingress controller.
 
 1. If you don't already have helm installed, do the following:
@@ -405,7 +417,7 @@ We are going to setup the ingress controller.
     As you can see, the `ingress-nginx-controller` shows a pending external ip. This is because external ip cannot be assigned yet. For that we need to install MetalLB.
 
 
-### 1.3.2 Installing Metal LB
+### 3.2 Installing Metal LB
 Here we will install metal lb for external ip address provisioning.
 
 1. First, lets install metal lb.
@@ -468,10 +480,10 @@ EOF
     ```
     As you can see, the controller now has an external IP. So our metal Lb has been setup.
 
-## 1.4 Setting up NFS
+## 4 Setting up NFS
 Here we will be setting up NFS server on our Mac, then mount to it from within the kubernetes cluster. Mounting will be done with CLI tools as well as Python Code by creating Persistent Volumes and Persistent Volume Claims.
 
-### 1.4.1 Setting up NFS on Mac
+### 4.1 Setting up NFS on Mac
 There were a lot of issues but we will not cover those here, we will only put what worked in here for documentation purposes.
 We already have an NFS server on a Mac, we only need to configure it.
 
@@ -525,7 +537,7 @@ We already have an NFS server on a Mac, we only need to configure it.
     ```
     If it doesn't show this, you need to resolve it. This rule should show up as our exports rule. It only works after that.
 
-### 1.4.2 Testing the NFS server with CLI
+### 4.2 Testing the NFS server with CLI
 Here we will create a dummy Kubernetes Pod and then try to mount to our external NFS from there.
 
 1. Start a dummy pod.
@@ -577,3 +589,87 @@ Here we will create a dummy Kubernetes Pod and then try to mount to our external
     ```
     This file will exist in `/mnt/nfs` as well as in `/Users/Shared/<nfs-directory>`. The contents will be "test from pvc".
     Try deleting the pod and create a new one, as soon as you create the pod, this file will be available in that pod.
+
+### 4.3 Setting up our Development Environment
+1. We would like to make changes locally and have that reflected inside the Pod.
+    - In docker, we can do this using the `-v` flag. This would map our local directory a directory in the pod. This is what it looks like:
+        ```
+        local machine -> docker container
+        ```
+
+    - If we use `kind` or `minikube` with docker desktop, we can do this using `HostPath` volume map. This is because the node for our `kind` or `minikube` cluster is our machine. `HostPath` maps to the path in the node. So we can directly map our working directory to the pod using `HostPath` volume type.
+        ```
+        local machine -> kind cluster
+        ```
+
+    - When using a `multipass`, we create a virtual machine. The nodes are in the virtual machine. `HostPath` maps to the path in the node which is the VM. Our local directory is not inside the VM, so the changes we make locally will not be reflected inside the pod.
+
+    - To do that, we need to map our local working directory to our `VM` through the `NFS` that we just installed. Then we can map the mapped directory in the `HostPath` in the Pod. So its like:
+        ```
+        local machine -> VM path -> Multipass Cluster
+        ```
+
+2. First we create an export rule for our working directory. I like to create a rule for the entire project directory that I have. Open `/etc/exports` on your local MAC and add this line.
+    ```text
+    <path/to/project> -alldirs -mapall=501:20 192.168.64.2 192.168.64.3 192.168.64.4 192.168.64.5
+    ```
+    We can get the ip addresses using `multipass list`.
+    This makes our project directory shareable via NFS.
+
+3. Now enter into each of the nodes in the cluster, and install nfs common tools.
+    ```bash
+    multipass shell <machine>
+    ```
+    Once inside, install nfs common tools.
+    ```bash
+    sudo apt update && sudo apt install nfs-common -y
+    ```
+    This will let you use nfs tools.
+    Our resources might be deployed on any of the nodes. So we need to use NFS mounting from whichever node our resources are scheduled in.
+
+4. Next, lets mount our projects directory in all of the nodes, so that the project directory is available in all nodes.
+    Go inside each node and create a directory where the project directory is mapped.
+    ```bash
+    multipass shell <node>
+    ```
+    Create a the directory that will be mounted to the project directory:
+    ```bash
+    mkdir /mnt/<directory>
+    ```
+    The
+    ```bash
+    sudo mount -t nfs -o vers=3,nolock 192.168.1.2:<path/to/project> /mnt/<directory>
+    ```
+    Next, we can use the created directory `/mnt/<directory>`, as our working directory.
+
+5. Problem with the mount:
+    - When you mount the directory on our MAC to the VM. Things work.
+    - When your laptop sleeps, reboots, or disconnects from the network, the mount on the nodes breaks.
+    - This causes:
+        - Pods that rely on that mount to fail.
+        - Hanging shells (because the filesystem access blocks).
+        - Crashes or unresponsive containers.
+    - So every time the laptop sleeps, we need to re-setup everything.
+
+5. Unmount
+    ```bash
+    sudo umount -l /mnt/projects
+    ```
+
+6. We can also make things a little easier by:
+    - Installing an NFS server on the VM master node.
+    - Mapping the directory from our host machine to the master node.
+        localMachine(NFSServer) -> VMPath (MasterNode-NFSClient)
+    - Then use the server on the Masternode to map to the worker nodes.
+        localMachine(NFSServer) -> VMPath(MasterNode-NFSClient)
+        VMPath(MasterNode-NFSServer) -> Worker1(NFSClient)
+        VMPath(MasterNode-NFSServer) -> Worker2(NFSClient)
+        VMPath(MasterNode-NFSServer) -> Worker3(NFSClient)
+    - This way we have a single point of failure. The only connection that we need to keep maintaining is this: `localMachine(NFSServer) -> VMPath(MasterNode-NFSClient)` one.
+    - However, if the computer sleeps, even this connection gets removed and as a consequence the same results appear again.
+        - Pods that rely on that mount to fail.
+        - Hanging shells (because the filesystem access blocks).
+        - Crashes or unresponsive containers.
+    - So this setup is okay for testing HA deployments and all but not so ideal for development.
+
+7. This cluster also has no internet access. Because of which, we will be unable to work with the internet. Enabling that is also a pain and we haven't figured that out yet. Will add more updates once figured out.
