@@ -659,12 +659,16 @@ Here we will create a dummy Kubernetes Pod and then try to mount to our external
 6. We can also make things a little easier by:
     - Installing an NFS server on the VM master node.
     - Mapping the directory from our host machine to the master node.
+        ```
         localMachine(NFSServer) -> VMPath (MasterNode-NFSClient)
+        ```
     - Then use the server on the Masternode to map to the worker nodes.
+        ```
         localMachine(NFSServer) -> VMPath(MasterNode-NFSClient)
         VMPath(MasterNode-NFSServer) -> Worker1(NFSClient)
         VMPath(MasterNode-NFSServer) -> Worker2(NFSClient)
         VMPath(MasterNode-NFSServer) -> Worker3(NFSClient)
+        ```
     - This way we have a single point of failure. The only connection that we need to keep maintaining is this: `localMachine(NFSServer) -> VMPath(MasterNode-NFSClient)` one.
     - However, if the computer sleeps, even this connection gets removed and as a consequence the same results appear again.
         - Pods that rely on that mount to fail.
