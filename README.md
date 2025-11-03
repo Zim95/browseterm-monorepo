@@ -1,4 +1,11 @@
 # BROWSETERM
+
+<!-- Dynamic Repository Stats -->
+![GitHub repo size](https://img.shields.io/github/repo-size/Zim95/browseterm-monorepo?style=for-the-badge)
+![GitHub last commit](https://img.shields.io/github/last-commit/Zim95/browseterm-monorepo?style=for-the-badge)
+![GitHub issues](https://img.shields.io/github/issues/Zim95/browseterm-monorepo?style=for-the-badge)
+![License](https://img.shields.io/github/license/Zim95/browseterm-monorepo?style=for-the-badge)
+
 Browseterm is a project that allows users to run linux containers in the browser. The user can create and run different linux terminals and interact with them in the browser. Look at the demo:
 <add a gif>
 
