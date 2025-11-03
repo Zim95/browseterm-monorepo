@@ -1,0 +1,9 @@
+[submodule "socket-ssh"]
+	path = socket-ssh
+	url = https://github.com/Zim95/socket-ssh.git
+[submodule "cert-manager"]
+	path = cert-manager
+	url = https://github.com/Zim95/cert-manager.git
+[submodule "container-maker-spec"]
+	path = container-maker-spec
+	url = https://github.com/Zim95/container-maker-spec.git
