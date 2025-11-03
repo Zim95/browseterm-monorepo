@@ -16,6 +16,15 @@ Payment plans:
 3. Enterprise tier: Unlimited containers. Grow storage size and memory size. (Coming soon later).
 
 This repository holds the complete browseterm project. This respository is a collection of all the other repositories that add up to become Browseterm.
+
+## 🛠️ Technology Stack
+
+| Service | Primary Languages | Description |
+|---------|------------------|-------------|
+| **cert-manager** | ![Python](https://img.shields.io/badge/Python-62.6%25-3776AB?style=flat-square) ![YAML](https://img.shields.io/badge/YAML-16.1%25-cb171e?style=flat-square) ![Shell](https://img.shields.io/badge/Shell-12.4%25-89e051?style=flat-square) | Certificate management service |
+| **container-maker-spec** | ![Python](https://img.shields.io/badge/Python-76.9%25-3776AB?style=flat-square) ![Protocol Buffer](https://img.shields.io/badge/Protocol%20Buffer-19.5%25-4285F4?style=flat-square) ![TOML](https://img.shields.io/badge/TOML-3.6%25-9c4221?style=flat-square) | gRPC service definitions and generated code |
+| **socket-ssh** | ![JSON](https://img.shields.io/badge/JSON-78.6%25-292929?style=flat-square) ![JavaScript](https://img.shields.io/badge/JavaScript-17.5%25-F7DF1E?style=flat-square) ![Shell](https://img.shields.io/badge/Shell-1.9%25-89e051?style=flat-square) | WebSocket server for SSH connections |
+
 Here are all the services that browseterm has:
 1. Browseterm-Dockerfiles:
     This repo is the holder of the dockerfiles used for our linux images.
@@ -37,6 +46,14 @@ Here are all the services that browseterm has:
     - Renders templates.
     - Handles Authentication.
     - Acts like an API Gateway.
+
+## 🛠️ Technology Stack
+
+| Service | Primary Languages | Description |
+|---------|------------------|-------------|
+| **cert-manager** | ![Python](https://img.shields.io/badge/Python-62.6%25-3776AB?style=flat-square) ![YAML](https://img.shields.io/badge/YAML-18.7%25-cb171e?style=flat-square) ![Shell](https://img.shields.io/badge/Shell-13.7%25-89e051?style=flat-square) | Certificate management service |
+| **container-maker-spec** | ![Python](https://img.shields.io/badge/Python-76.9%25-3776AB?style=flat-square) ![Protocol Buffer](https://img.shields.io/badge/Protocol Buffer-19.5%25-4285F4?style=flat-square) ![TOML](https://img.shields.io/badge/TOML-3.6%25-9c4221?style=flat-square) | gRPC service definitions and generated code |
+| **socket-ssh** | ![JSON](https://img.shields.io/badge/JSON-78.6%25-292929?style=flat-square) ![JavaScript](https://img.shields.io/badge/JavaScript-17.5%25-F7DF1E?style=flat-square) ![Shell](https://img.shields.io/badge/Shell-1.9%25-89e051?style=flat-square) | WebSocket server for SSH connections |
 
 To get started, clone this repo:
 ```bash
