@@ -42,3 +42,15 @@ $ git submodule update --init --recursive
 ```
 
 # Setting up our microservices.
+
+## License
+
+This project is licensed under the GNU Affero General Public License v3.0 (AGPL-3.0). See the [LICENSE](LICENSE) file for details.
+
+### What this means:
+- ✅ You can use, modify, and distribute this software
+- ✅ You must provide source code for any modifications
+- ⚠️ **Network use is distribution** - If you run this software on a server that users interact with over a network, you must provide the source code to those users
+- ✅ Perfect for open-source SaaS projects that want to prevent proprietary forks
+
+For commercial licensing options, please contact [your-email@example.com].
