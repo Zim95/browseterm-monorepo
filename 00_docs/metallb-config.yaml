@@ -1,0 +1,33 @@
+# Multipass Cluster Configuration
+# MetalLB Load Balancer Configuration for Multipass K3s Cluster
+# 
+# This configuration sets up MetalLB with an IP address pool
+# for load balancing services in the multipass cluster.
+#
+# Usage:
+#   kubectl apply -f multipass_cluster.yaml
+#
+# Prerequisites:
+#   1. MetalLB must be installed:
+#      kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.13.7/config/manifests/metallb-native.yaml
+#   2. Wait for MetalLB to be ready:
+#      kubectl wait --namespace metallb-system --for=condition=ready pod --selector=app=metallb --timeout=90s
+
+---
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: first-pool
+  namespace: metallb-system
+spec:
+  addresses:
+  - 192.168.64.200-192.168.64.250
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: l2advertisement
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+  - first-pool

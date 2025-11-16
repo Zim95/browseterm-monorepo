@@ -1,34 +1,20 @@
 # BROWSETERM
 
-<!-- Dynamic Repository Stats -->
-![GitHub repo size](https://img.shields.io/github/repo-size/Zim95/browseterm-monorepo?style=for-the-badge)
-![GitHub last commit](https://img.shields.io/github/last-commit/Zim95/browseterm-monorepo?style=for-the-badge)
-![GitHub issues](https://img.shields.io/github/issues/Zim95/browseterm-monorepo?style=for-the-badge)
-![License](https://img.shields.io/github/license/Zim95/browseterm-monorepo?style=for-the-badge)
-
 Browseterm is a project that allows users to run linux containers in the browser. The user can create and run different linux terminals and interact with them in the browser. Look at the demo:
 <add a gif>
 
 Payment plans:
 --------------
-1. Free tier: One container per user.
-2. Developer tier: Unlimited containers.
-3. Enterprise tier: Unlimited containers. Grow storage size and memory size. (Coming soon later).
+1. Free Plan:  Default subscription model. 1 Container, 1 CPU, 1 GB Memory.  
+2. Basic Plan: 100 INR. 5 Containers, 1 CPU, 1 GB Memory.  
+3. Pro Plan:   700 INR. 30 Containers, 12 CPU, 12 GB Memory.  
 
 This repository holds the complete browseterm project. This respository is a collection of all the other repositories that add up to become Browseterm.
 
-## 🛠️ Technology Stack
-
-| Service | Primary Languages | Description |
-|---------|------------------|-------------|
-| **cert-manager** | ![Python](https://img.shields.io/badge/Python-62.6%25-3776AB?style=flat-square) ![YAML](https://img.shields.io/badge/YAML-16.1%25-cb171e?style=flat-square) ![Shell](https://img.shields.io/badge/Shell-12.4%25-89e051?style=flat-square) | Certificate management service |
-| **container-maker-spec** | ![Python](https://img.shields.io/badge/Python-76.9%25-3776AB?style=flat-square) ![Protocol Buffer](https://img.shields.io/badge/Protocol%20Buffer-19.5%25-4285F4?style=flat-square) ![TOML](https://img.shields.io/badge/TOML-3.6%25-9c4221?style=flat-square) | gRPC service definitions and generated code |
-| **socket-ssh** | ![JSON](https://img.shields.io/badge/JSON-78.6%25-292929?style=flat-square) ![JavaScript](https://img.shields.io/badge/JavaScript-17.5%25-F7DF1E?style=flat-square) ![Shell](https://img.shields.io/badge/Shell-1.9%25-89e051?style=flat-square) | WebSocket server for SSH connections |
-
 Here are all the services that browseterm has:
 1. Browseterm-Dockerfiles:
-    This repo is the holder of the dockerfiles used for our linux images.
-    It also holds builds the sidecar image that will be used for our images.
+    - This is the blueprint of our terminals.  
+    - Holds our 
 2. Cert Manager:
     Responsible for managing certificates for all our microservices. Refreshes certificates every Sunday.
     NOTE: Needs a sidecar to create new deployments of the containers once the certificates have been refreshed.
@@ -46,14 +32,6 @@ Here are all the services that browseterm has:
     - Renders templates.
     - Handles Authentication.
     - Acts like an API Gateway.
-
-## 🛠️ Technology Stack
-
-| Service | Primary Languages | Description |
-|---------|------------------|-------------|
-| **cert-manager** | ![Python](https://img.shields.io/badge/Python-62.6%25-3776AB?style=flat-square) ![YAML](https://img.shields.io/badge/YAML-18.7%25-cb171e?style=flat-square) ![Shell](https://img.shields.io/badge/Shell-13.7%25-89e051?style=flat-square) | Certificate management service |
-| **container-maker-spec** | ![Python](https://img.shields.io/badge/Python-76.9%25-3776AB?style=flat-square) ![Protocol Buffer](https://img.shields.io/badge/Protocol Buffer-19.5%25-4285F4?style=flat-square) ![TOML](https://img.shields.io/badge/TOML-3.6%25-9c4221?style=flat-square) | gRPC service definitions and generated code |
-| **socket-ssh** | ![JSON](https://img.shields.io/badge/JSON-78.6%25-292929?style=flat-square) ![JavaScript](https://img.shields.io/badge/JavaScript-17.5%25-F7DF1E?style=flat-square) ![Shell](https://img.shields.io/badge/Shell-1.9%25-89e051?style=flat-square) | WebSocket server for SSH connections |
 
 To get started, clone this repo:
 ```bash
