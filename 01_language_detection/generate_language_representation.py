@@ -272,15 +272,16 @@ def write_dummy_files(
         target = GENERATED_DIR / filename
 
         with target.open("w", encoding="utf-8") as f:
-            header = (
-                f"{comment_prefix} Auto-generated file representing {lang} usage.\n"
-                f"{comment_prefix} Lines here are synthetic and exist only to help\n"
-                f"{comment_prefix} GitHub show accurate language percentages.\n"
-                f"{comment_prefix} Total dummy lines requested in this file group: {total_dummy_lines}\n"
-            )
-            f.write(header)
+            header_lines = [
+                f"{comment_prefix} File used for language distribution visualization for {lang}.\n",
+                f"{comment_prefix} This repository includes multiple languages; this file\n",
+                f"{comment_prefix} contributes {lang} lines so that language statistics remain representative.\n",
+                f"{comment_prefix} Total dummy lines requested in this file group: {total_dummy_lines}\n",
+            ]
+            for hl in header_lines:
+                f.write(hl)
 
-            remaining = max(0, num_lines - header.count("\n"))
+            remaining = max(0, num_lines - len(header_lines))
             for _ in range(remaining):
                 # We keep the content trivial but slightly varied.
                 word_count = random.randint(3, 8)
