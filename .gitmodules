@@ -7,3 +7,9 @@
 [submodule "container-maker-spec"]
 	path = container-maker-spec
 	url = https://github.com/Zim95/container-maker-spec.git
+[submodule "postgres_ha"]
+	path = postgres_ha
+	url = https://github.com/Zim95/postgres_ha.git
+[submodule "browseterm-db"]
+	path = browseterm-db
+	url = https://github.com/Zim95/browseterm-db.git
