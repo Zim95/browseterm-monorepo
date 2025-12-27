@@ -30,7 +30,21 @@ Here are all the services that browseterm has:
     **Type:** Docker Image.  
     **Description:** The socket interface to our linux containers. Used by front-end to stream SSH data.  
   
-
+**5. Browseterm-Dockerfiles:**  
+    **Type:** Docker Image(s).  
+    **Description:** There are multiple images to build here:  
+        - **Linux Images:** These are our linux images. Right now, we only have ubuntu.  
+        - **Status Sidecar:** This is the status sidecar. We need to build this image to update status of our containers. This will act as the status monitor sidecar container.  
+        - **Snapshot Sidecar:** This is the snapshot sidecar. We need to build this image to create a snapshot image of our containers. This will act as the snapshot sidecar container.  
+  
+**6. Redis HA:**  
+    **Type:** MicroService.  
+    **Description:** This is our Redis server. Used for Cache and Auth State Management.  
+  
+**7. Container Maker Spec:**
+    **Type:** Python Library (GRPC).  
+    **Description:** This is the GRPC library that is used to communicate with our other microservice called `container-maker`.  
+  
 
 # Getting Started
 To get started, clone this repo:
@@ -78,8 +92,39 @@ $ git submodule update --init --recursive
     - Go inside, the dev pod, hit `npm install` and then run `npm run test`.  
     - This makes sure the code is working fine.  
   
-7. 
+7. Next, we will build another docker image `browseterm-dockerfiles`. These are the images that will be used by our linux containers. This is the repository: `https://github.com/Zim95/browseterm-dockerfiles`. You can follow the `README` to understand the setup. Simply clone the repo, go inside it and hit `make build_all`.  
 
+8. Next, we will setup our Redis Server. We use this for Auth State Management and as our Cache. This is the repository: `https://github.com/Zim95/redis_ha`. For this repo, you can go to the `README`, but only look at the `env.mk` file. DO NOT go through the setup. Just hit `make dev_redis_single_setup`.  
+
+9. Next, we will clone the `container-maker-spec` repository. This is our GRPC python package. We don't need to build it. But, we do need to run the builder once we are done with making changes. Go to the `README` file and checkout `How to make it installable from git` section. Here is the link to the repository: `https://github.com/Zim95/container-maker-spec`.
+  
+
+# Working with submodules:  
+1. Adding a submodule:  
+    ```bash
+    $ git submodule add <repository_url> <path>
+    $ git add .gitmodules <path>
+    $ git commit -m "Add submodule <name>"
+    $ git push origin
+    ```
+  
+2. Removing a submodule:  
+    ```bash
+    $ git submodule deinit -f -- <path>
+    $ git rm -f <path>
+    $ rm -rf .git/modules/<path>
+    $ git commit -m "Remove submodule <name>"
+    $ git push origin
+    ```
+  
+3. Updating submodules to their latest commit:  
+    ```bash
+    $ git submodule update --init --remote --merge --recursive
+    $ git add <path> # or `git add .` to add all changed submodule pointers
+    $ git commit -m "Update submodules to latest remote commits"
+    $ git push origin
+    ```
+  
 ## License
 This project is licensed under the GNU Affero General Public License v3.0 (AGPL-3.0). See the [LICENSE](LICENSE) file for details.
 
