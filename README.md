@@ -16,10 +16,12 @@ Here are all the services that browseterm has:
 **1. PostgresHA:**  
     **Type:** MicroService.  
     **Description:** Our database. Prioritizes consistency since we have a lot of payment data. A combination of: ETCD, Patroni, HAProxy, Postgres Cluster, PGBackRest.  
+
 **2. BrowsetermDB:**  
     **Type:** Python Library for Database and Migrations.  
     **Description:** Contains database models, operations on top of models (CRUD), database event listener, Migrations manager.  
     **NOTE:** Need to run migrations once the database is setup.  
+
 **3. CertManager:**  
     **Type:** MicroService (CronJob).  
     **Description:** Manage certificates and rollout new deployments for microservices. Can create job on the fly. Can also be invoked by other services for custom certificate creation.  
@@ -49,20 +51,20 @@ $ git submodule update --init --recursive
   
 5. Now, we need to setup our certificate manager. The repository to do this is `cert-manager`. Here is the link: `https://github.com/Zim95/cert-manager`. You can follow the `README` for the setup.  
   
-However, there are a few details to note:  
-- Build the image:
-    ```bash
-    make prod_build
-    ```
-- Deploy the cron job:
-    ```bash
-    make prod_setup
-    ```
-- Immediately create the certificates. Normally, they are created every Sunday. So, we need to create one immediately:  
-    ```bash
-    kubectl create job --from=cronjob/<your-cronjob-name> cert-manager-job -n <namespace>
-    ```
-    This will create a Job and create the necessary certificates immediately.  
+    However, there are a few details to note:  
+    - Build the image:
+        ```bash
+        make prod_build
+        ```
+    - Deploy the cron job:
+        ```bash
+        make prod_setup
+        ```
+    - Immediately create the certificates. Normally, they are created every Sunday. So, we need to create one immediately:  
+        ```bash
+        kubectl create job --from=cronjob/<your-cronjob-name> cert-manager-job -n <namespace>
+        ```
+        This will create a Job and create the necessary certificates immediately.  
 
 ## License
 This project is licensed under the GNU Affero General Public License v3.0 (AGPL-3.0). See the [LICENSE](LICENSE) file for details.
