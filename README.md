@@ -41,7 +41,7 @@ Here are all the services that browseterm has:
     **Type:** MicroService.  
     **Description:** This is our Redis server. Used for Cache and Auth State Management.  
   
-**7. Container Maker Spec:**
+**7. Container Maker Spec:**  
     **Type:** Python Library (GRPC).  
     **Description:** This is the GRPC library that is used to communicate with our other microservice called `container-maker`.  
   
