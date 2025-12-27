@@ -12,7 +12,7 @@ Payment plans:
 This repository holds the complete browseterm project. This respository is a collection of all the other repositories that add up to become Browseterm.
 
 # MicroServices:
-Here are all the services that browseterm has:
+Here are all the services that browseterm has:  
 **1. PostgresHA:**  
     **Type:** MicroService.  
     **Description:** Our database. Prioritizes consistency since we have a lot of payment data. A combination of: ETCD, Patroni, HAProxy, Postgres Cluster, PGBackRest.  
