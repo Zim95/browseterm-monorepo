@@ -16,3 +16,6 @@
 [submodule "browseterm-dockerfiles"]
 	path = browseterm-dockerfiles
 	url = https://github.com/Zim95/browseterm-dockerfiles
+[submodule "redis_ha"]
+	path = redis_ha
+	url = https://github.com/Zim95/redis_ha
