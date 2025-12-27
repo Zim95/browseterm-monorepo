@@ -25,6 +25,12 @@ Here are all the services that browseterm has:
 **3. CertManager:**  
     **Type:** MicroService (CronJob).  
     **Description:** Manage certificates and rollout new deployments for microservices. Can create job on the fly. Can also be invoked by other services for custom certificate creation.  
+  
+**4. Socket-SSH:**  
+    **Type:** Docker Image.  
+    **Description:** The socket interface to our linux containers. Used by front-end to stream SSH data.  
+  
+
 
 # Getting Started
 To get started, clone this repo:
@@ -37,7 +43,7 @@ In case you forget to include submodules:
 $ git submodule update --init --recursive
 ```
   
-# Setting up our microservices.
+# Setting up our MicroServices.
 1. First, we need to setup our cluster. We need to install MetalLB. This is for external IP addresses. Check out `00_docs/metallb_setup.md` to learn more.  
   
 2. Next, create the namespace for your cluster.
@@ -62,9 +68,17 @@ $ git submodule update --init --recursive
         ```
     - Immediately create the certificates. Normally, they are created every Sunday. So, we need to create one immediately:  
         ```bash
-        kubectl create job --from=cronjob/<your-cronjob-name> cert-manager-job -n <namespace>
+        kubectl create job --from=cronjob/cert-manager cert-manager-job -n <namespace>
         ```
         This will create a Job and create the necessary certificates immediately.  
+  
+6. Next, lets set-up our `socket-ssh` docker image. We actually only need to build an image for this one. But it is recommended, to deploy the dev version and run tests, so that you know things are working as they should. This is the link to the repository: `https://github.com/Zim95/socket-ssh`. You can go through the `README`.  
+    - First, build the prod image.  
+    - Then, build the dev image and run dev setup.  
+    - Go inside, the dev pod, hit `npm install` and then run `npm run test`.  
+    - This makes sure the code is working fine.  
+  
+7. 
 
 ## License
 This project is licensed under the GNU Affero General Public License v3.0 (AGPL-3.0). See the [LICENSE](LICENSE) file for details.
