@@ -13,3 +13,6 @@
 [submodule "browseterm-db"]
 	path = browseterm-db
 	url = https://github.com/Zim95/browseterm-db.git
+[submodule "browseterm-dockerfiles"]
+	path = browseterm-dockerfiles
+	url = https://github.com/Zim95/browseterm-dockerfiles
