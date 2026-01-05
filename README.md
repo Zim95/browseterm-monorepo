@@ -1,16 +1,16 @@
 # BROWSETERM
-
-Browseterm is a project that allows users to run linux containers in the browser. The user can create and run different linux terminals and interact with them in the browser. Look at the demo:
+  
+Browseterm is a project that allows users to run linux containers in the browser. The user can create and run different linux terminals and interact with them in the browser. Look at the demo:  
 <add a gif>
-
+  
 Payment plans:
 --------------
 1. Free Plan:  Default subscription model. 1 Container, 1 CPU, 1 GB Memory.  
 2. Basic Plan: 100 INR. 5 Containers, 1 CPU, 1 GB Memory.  
 3. Pro Plan:   500 INR. 30 Containers, 12 CPU, 12 GB Memory.  
-
-This repository holds the complete browseterm project. This respository is a collection of all the other repositories that add up to become Browseterm.
-
+  
+This repository holds the complete browseterm project. This respository is a collection of all the other repositories that add up to become Browseterm.  
+  
 # MicroServices:
 Here are all the services that browseterm has:  
 **1. PostgresHA:**  
@@ -27,7 +27,7 @@ Here are all the services that browseterm has:
     **Description:** Manage certificates and rollout new deployments for microservices. Can create job on the fly. Can also be invoked by other services for custom certificate creation.  
   
 **4. Socket-SSH:**  
-    **Type:** Docker Image.  
+    **Type:** MicroService.  
     **Description:** The socket interface to our linux containers. Used by front-end to stream SSH data.  
   
 **5. Browseterm-Dockerfiles:**  
@@ -86,17 +86,18 @@ $ git submodule update --init --recursive
         ```
         This will create a Job and create the necessary certificates immediately.  
   
-6. Next, lets set-up our `socket-ssh` docker image. We actually only need to build an image for this one. But it is recommended, to deploy the dev version and run tests, so that you know things are working as they should. This is the link to the repository: `https://github.com/Zim95/socket-ssh`. You can go through the `README`.  
-    - First, build the prod image.  
-    - Then, build the dev image and run dev setup.  
+6. Next, lets set-up our `socket-ssh` docker image. This is the link to the repository: `https://github.com/Zim95/socket-ssh`. You can go through the `README`.  
+    - First, build the dev image.  
+    - Then, run dev setup.  
     - Go inside, the dev pod, hit `npm install` and then run `npm run test`.  
-    - This makes sure the code is working fine.  
+    - This makes sure the code is working fine. 
+    - Then build the prod image followed by prod setup.  
   
 7. Next, we will build another docker image `browseterm-dockerfiles`. These are the images that will be used by our linux containers. This is the repository: `https://github.com/Zim95/browseterm-dockerfiles`. You can follow the `README` to understand the setup. Simply clone the repo, go inside it and hit `make build_all`.  
-
+  
 8. Next, we will setup our Redis Server. We use this for Auth State Management and as our Cache. This is the repository: `https://github.com/Zim95/redis_ha`. For this repo, you can go to the `README`, but only look at the `env.mk` file. DO NOT go through the setup. Just hit `make dev_redis_single_setup`.  
-
-9. Next, we will clone the `container-maker-spec` repository. This is our GRPC python package. We don't need to build it. But, we do need to run the builder once we are done with making changes. Go to the `README` file and checkout `How to make it installable from git` section. Here is the link to the repository: `https://github.com/Zim95/container-maker-spec`.
+  
+9. Next, we will clone the `container-maker-spec` repository. This is our GRPC python package. We don't need to build it. But, we do need to run the builder once we are done with making changes. Go to the `README` file and checkout `How to make it installable from git` section. Here is the link to the repository: `https://github.com/Zim95/container-maker-spec`.  
   
 
 # Working with submodules:  
