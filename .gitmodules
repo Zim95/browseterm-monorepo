@@ -22,3 +22,9 @@
 [submodule "browseterm-storage"]
 	path = browseterm-storage
 	url = https://github.com/Zim95/browseterm-storage.git
+[submodule "browseterm-server"]
+	path = browseterm-server
+	url = https://github.com/Zim95/browseterm-server.git
+[submodule "container-maker"]
+	path = container-maker
+	url = https://github.com/Zim95/container-maker.git
