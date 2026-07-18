@@ -19,3 +19,6 @@
 [submodule "redis_ha"]
 	path = redis_ha
 	url = https://github.com/Zim95/redis_ha
+[submodule "browseterm-storage"]
+	path = browseterm-storage
+	url = https://github.com/Zim95/browseterm-storage.git

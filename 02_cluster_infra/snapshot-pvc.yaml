@@ -1,0 +1,30 @@
+# PersistentVolume backed by hostPath (single-node development only)
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: snapshot-pv
+spec:
+  capacity:
+    storage: 20Gi
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: hostpath-snapshot
+  hostPath:
+    path: /mnt/browseterm-snapshots
+    type: DirectoryOrCreate
+
+---
+# PersistentVolumeClaim for snapshot sharing
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: snapshot-pvc
+  namespace: browseterm-new
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 20Gi
+  storageClassName: hostpath-snapshot
