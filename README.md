@@ -200,8 +200,7 @@ cd -
 
 ```bash
 cd cert-manager           # env.mk: USER_NAME, REPO_NAME, NAMESPACE, HOST_DIR
-docker login -u zim95     # images are pushed to Docker Hub; enter your token/password when prompted
-make prod_build
+make prod_build           # the build script runs `docker login` itself and will prompt for your Docker Hub password on the first push
 make prod_setup           # creates the CronJob (schedule: Sundays 05:00)
 # certs are otherwise generated weekly — trigger one now:
 kubectl create job --from=cronjob/cert-manager cert-manager-job -n browseterm
@@ -217,7 +216,6 @@ kubectl get secrets -n browseterm | grep certs
 *Why: these are the images container-maker runs at runtime — the ubuntu SSH container (the user's terminal), the status_sidecar (writes the pod's status to the DB), and the snapshot_job (builds+pushes a container snapshot on save).*
 ```bash
 cd browseterm-dockerfiles     # env.mk: USER_NAME, REPO_NAME (+ REPO_PASSWORD/SNAPSHOT_PATH for snapshot_job)
-docker login -u zim95         # if not already logged in
 make build_ubuntu
 make build_status_sidecar
 # build_snapshot_job / build_all are broken (point at a non-existent ./snapshot_job/build.sh); build it directly:
@@ -239,8 +237,6 @@ For each service: make its dev entrypoint executable, build+push the image, then
 *Why the chmod: in **development mode** the manifest bind-mounts your local repo into the pod at `/app` (hostPath) so your editor changes are live inside the container. That mount **shadows the image's copy of the entrypoint**, so the local file must be executable on the host.*
 
 ```bash
-docker login -u zim95     # once per session
-
 # 10a. container-maker (needs the cert secret from §7)
 cd container-maker
 chmod +x ./infra/k8s/development/entrypoint-development.sh
