@@ -32,11 +32,11 @@ Here we are going to setup our IP addresses for portforwarding.
     255.255.255.255 broadcasthost
     ::1             localhost
     192.168.0.3     browseterm.local.com
-    192.168.0.4     socketssh.local
+    192.168.0.4     socket-ssh.local.com
     ```
     Copy this into your `/etc/hosts` file.
   
-- Now using `browseterm.local.com` will map to `192.168.0.3` and `socketssh.local` will map to `192.168.0.4`.
+- Now using `browseterm.local.com` will map to `192.168.0.3` and `socket-ssh.local.com` will map to `192.168.0.4`.
 
 # Port-Forwarding our services
 - Now, we need to portforward our services to these ip addresses.
