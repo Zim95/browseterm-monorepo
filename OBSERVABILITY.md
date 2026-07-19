@@ -48,8 +48,28 @@ This keeps the app code decoupled from the backends.
 
 Everything below depends on logs existing and being structured.
 
-1. **Structured logging in every service.** Replace ad-hoc `print()` with a real logger emitting
-   **JSON** lines: `timestamp, level, service, message, request_id, user_id, container_id, ...`.
+### Canonical log line format (decided)
+
+Every log line MUST lead with these bracketed fields, then the message:
+
+```
+[time][username:email][request_id]<rest of the log>
+```
+
+- **time** — ISO-8601 UTC timestamp.
+- **username:email** — the acting user for this request (from the session). `system:-` (or similar)
+  for lines with no user context (startup, background reapers).
+- **request_id** — the correlation id threaded through the whole flow (== trace_id; see below).
+- **rest** — level + message + any extra key=values.
+
+Example: `[2026-07-19T16:04:33Z][namah:namah@lyric.tech][abc123] ERROR save: 403 creating role`
+
+Keep the bracketed prefix human-readable AND machine-parseable — emit the same fields as structured
+JSON attributes too (or logfmt) so Loki/Grafana and the MCP can query on `user`, `request_id`, etc.
+without regex-scraping. Note: `email` is PII — mind log retention/access accordingly.
+
+1. **Structured logging in every service.** Replace ad-hoc `print()` with a real logger emitting the
+   format above, with fields also as **JSON**: `timestamp, level, service, message, request_id, user, email, container_id, ...`.
    - Python services (browseterm-server, container-maker, snapshot-job): `logging` +
      a JSON formatter (e.g. `python-json-logger`), `PYTHONUNBUFFERED=1` so lines flush immediately.
    - socket-ssh (Node): `pino` (JSON by default).
