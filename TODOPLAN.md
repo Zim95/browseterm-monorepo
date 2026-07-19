@@ -131,5 +131,47 @@ The terminal page already has an `ads-sidebar` with placeholder `ad-banner`s.
 5. **Single-command deploy** (#5) — quality-of-life, unblocks clean prod/staging.
 6. **Ads** (#4) — after payments (entitlement gating).
 7. **Production hardening** (#7) — before any public launch, especially isolation.
+
+---
+
+## Effort estimates (dev-days)
+
+Rough estimates for **one experienced dev already familiar with this codebase**. Ranges are
+optimistic–realistic; "plan" is what to schedule against. A dev-day = one focused working day.
+
+| # | Area | Range | Plan |
+|---|---|---:|---:|
+| 0 | Finish & verify SAVE end-to-end | 1–2 | **1.5** |
+| 1 | Workspace lifecycle (activity → resume → reaper → crash recovery) | 8–13 | **10** |
+| 2 | Observability (logging → Loki → Prometheus → Tempo → MCP) | 9–15 | **12** |
+| 3 | Payments (Stripe: plans, checkout, webhooks, entitlements, billing UI) | 8–14 | **11** |
+| 4 | Ads (integration, serving, free-tier gating, analytics) | 3–5 | **4** |
+| 5 | Single-command deploy + teardown (aggregated env.mk, make setup/teardown, fix targets) | 4–5 | **4** |
+| 6 | Known bugs / tech debt (trigger fix, sidecar tests, secret hygiene, privileged, MetalLB) | 5–8 | **6** |
+| 7 | Production hardening / security / HA / backups (**isolation dominates**) | 13–23 | **17** |
+| 8 | Testing & CI (CI pipeline; suite verification net of #6) | 2–3 | **3** |
+| 9 | Docs & GTM (architecture writeup, landing, demo video) | 3–5 | **4** |
+| | **Total to production launch** | **56–93** | **≈ 72** |
+
+So **~72 dev-days ≈ 14–15 working weeks (~3–4 months) solo** to a hardened public launch.
+A **demoable MVP** (0, 1, minimal 2, 5) is far closer — **~20–25 dev-days**.
+
+### Easy wins — grab tomorrow (≤1 day each, low-risk, high-value)
+
+- [ ] **`PYTHONUNBUFFERED=1`** on the Python deployments (~0.25d) — instant live logs; would've saved hours of the save debugging.
+- [ ] **Verify save end-to-end** (~0.5d + any small fixes) — the last confirmation; unblocks the lifecycle work.
+- [ ] **Secret hygiene**: move `REPO_PASSWORD` from `env.mk` to a k8s Secret (~0.5d).
+- [ ] **`status_sidecar` tests** — dummy-call coverage mirroring snapshot_job (~0.5–1d).
+- [ ] **Aggregated `env.mk` + fix broken make targets** (part of #5) (~1–2d).
+- [ ] **Persistence-model decision** for the lifecycle — PVC vs image vs hybrid (~0.5d; a decision, not code, but it unblocks #1).
+
+### Caveats
+
+- Estimates assume the current architecture holds; a persistence-model change (#1) or an isolation
+  approach like gVisor/Kata (#7) could swing #1/#7 meaningfully.
+- **#7 isolation is the widest range and the riskiest** — running untrusted user containers safely
+  is genuinely hard; budget conservatively.
+- Solo numbers. Parallelizing (e.g. a second dev on payments/ads) compresses calendar time but not
+  total dev-days.
 </content>
 </invoke>
