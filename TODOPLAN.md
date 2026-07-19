@@ -156,14 +156,17 @@ optimistic–realistic; "plan" is what to schedule against. A dev-day = one focu
 So **~72 dev-days ≈ 14–15 working weeks (~3–4 months) solo** to a hardened public launch.
 A **demoable MVP** (0, 1, minimal 2, 5) is far closer — **~20–25 dev-days**.
 
-### Easy wins — grab tomorrow (≤1 day each, low-risk, high-value)
+### Tomorrow's picks
 
+**Easy wins (≤1 day each, low-risk, high-value):**
 - [ ] **`PYTHONUNBUFFERED=1`** on the Python deployments (~0.25d) — instant live logs; would've saved hours of the save debugging.
 - [ ] **Verify save end-to-end** (~0.5d + any small fixes) — the last confirmation; unblocks the lifecycle work.
 - [ ] **Secret hygiene**: move `REPO_PASSWORD` from `env.mk` to a k8s Secret (~0.5d).
 - [ ] **`status_sidecar` tests** — dummy-call coverage mirroring snapshot_job (~0.5–1d).
-- [ ] **Aggregated `env.mk` + fix broken make targets** (part of #5) (~1–2d).
 - [ ] **Persistence-model decision** for the lifecycle — PVC vs image vs hybrid (~0.5d; a decision, not code, but it unblocks #1).
+
+**Larger scheduled item (§5, ~4d — start tomorrow):**
+- [ ] **Monorepo single-command deploy + teardown** — aggregated `env.mk` (per-service prefixes), one `make setup` (cluster → ingress-nginx → MetalLB → cert-manager → postgres → redis → migrate/seed → all services, ordered, non-interactive), one `make teardown`, and fix the remaining broken make targets (`build_all`, `prod_*`, `build_letsencrypt_issuer`). The aggregated `env.mk` + target fixes are the ≤1d slice; full orchestration is the rest.
 
 ### Caveats
 
