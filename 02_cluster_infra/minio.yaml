@@ -1,0 +1,149 @@
+# MinIO (S3-compatible object storage) for BrowseTerm container snapshots.
+#
+# Deploy:   kubectl apply -f 02_cluster_infra/minio.yaml
+# Namespace: browseterm. API on :9000 (svc minio-service), console on :9001.
+# browseterm-storage (MinioStorage) connects to minio-service:9000 with these root creds.
+# The bucket is created by the minio-createbucket Job (MinioStorage does not auto-create it).
+#
+# ⚠️ DEV credentials below (minioadmin/minioadmin123). For production, replace with a
+#    real Secret (and ideally scoped access keys), not hardcoded values in this manifest.
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: minio-creds
+  namespace: browseterm
+type: Opaque
+stringData:
+  MINIO_ROOT_USER: minioadmin
+  MINIO_ROOT_PASSWORD: minioadmin123
+  MINIO_BUCKET: browseterm-snapshots
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: minio-pvc
+  namespace: browseterm
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  namespace: browseterm
+  labels:
+    app: minio
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: minio
+  template:
+    metadata:
+      labels:
+        app: minio
+    spec:
+      containers:
+      - name: minio
+        image: minio/minio:latest
+        args: ["server", "/data", "--console-address", ":9001"]
+        env:
+        - name: MINIO_ROOT_USER
+          valueFrom:
+            secretKeyRef:
+              name: minio-creds
+              key: MINIO_ROOT_USER
+        - name: MINIO_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: minio-creds
+              key: MINIO_ROOT_PASSWORD
+        ports:
+        - containerPort: 9000
+          name: api
+        - containerPort: 9001
+          name: console
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        readinessProbe:
+          httpGet:
+            path: /minio/health/ready
+            port: 9000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "256Mi"
+          limits:
+            cpu: "1"
+            memory: "1Gi"
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: minio-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio-service
+  namespace: browseterm
+spec:
+  selector:
+    app: minio
+  ports:
+  - name: api
+    port: 9000
+    targetPort: 9000
+  - name: console
+    port: 9001
+    targetPort: 9001
+---
+# Creates the snapshots bucket once MinIO is up (MinioStorage does not auto-create it).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minio-createbucket
+  namespace: browseterm
+spec:
+  backoffLimit: 10
+  ttlSecondsAfterFinished: 300   # auto-remove the completed bucket-create pod 5 min after it finishes
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+      - name: createbucket
+        image: minio/mc:latest
+        env:
+        - name: MINIO_ROOT_USER
+          valueFrom:
+            secretKeyRef:
+              name: minio-creds
+              key: MINIO_ROOT_USER
+        - name: MINIO_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: minio-creds
+              key: MINIO_ROOT_PASSWORD
+        - name: MINIO_BUCKET
+          valueFrom:
+            secretKeyRef:
+              name: minio-creds
+              key: MINIO_BUCKET
+        command:
+        - /bin/sh
+        - -c
+        - |
+          set -e
+          until mc alias set local http://minio-service:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"; do
+            echo "waiting for minio..."; sleep 2
+          done
+          mc mb --ignore-existing "local/$MINIO_BUCKET"
+          mc ls local
+          echo "bucket ready: $MINIO_BUCKET"
