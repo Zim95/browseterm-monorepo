@@ -16,6 +16,7 @@ set -a; source env.mk; set +a
 
 # In-cluster service DNS (same-namespace short names) + constants.
 PG_HOST_INCLUSTER="browseterm-pg-service.browseterm.svc.cluster.local"
+PG_HOST_SHORT="browseterm-pg-service"  # server appends .NAMESPACE.svc... to build the terminal DB host
 REDIS_HOST_INCLUSTER="browseterm-redis-service"
 CM_DEV_HOST="container-maker-development-service"
 CM_DEV_PORT="50052"
@@ -129,7 +130,7 @@ REDIS_PORT=6379
 REDIS_PASSWORD=${REDIS_PASSWORD}
 REDIS_USERNAME=${REDIS_USER}
 REDIS_DB=${REDIS_DB}
-POSTGRES_HOST=${PG_HOST_INCLUSTER}
+POSTGRES_HOST=${PG_HOST_SHORT}
 POSTGRES_PORT=5432
 POSTGRES_USER=${PG_USER}
 POSTGRES_PASSWORD=${PG_PASSWORD}
