@@ -346,9 +346,26 @@ kubectl delete namespace browseterm
 sudo ifconfig lo0 -alias 192.168.0.3; sudo ifconfig lo0 -alias 192.168.0.4
 ```
 
+## Testing
+
+Each service documents how to run its own tests in its README's **"Running tests"** section. Project
+norm: **integration tests over unit tests**; Python tests use the **`unittest`** module (not pytest);
+DB-backed tests run against a **live Postgres on a separate test database**.
+
+| Service | Framework | Notes |
+|---|---|---|
+| browseterm-db | `unittest` | live Postgres, separate `TEST_DB_*` database |
+| container-maker | `unittest` | unit + gRPC need no cluster; `tests/k8s/integration` needs a live cluster |
+| browseterm-server | jest + `unittest` | frontend jest is self-contained; backend is integration (needs Postgres/Redis) |
+| browseterm-storage | `unittest` | MinIO mocked — no infra needed |
+| socket-ssh | jest | |
+| browseterm-dockerfiles / snapshot_job | `unittest` | see `snapshot_job/tests/README.md` |
+
+See `TODOPLAN.md` for the CI plan.
+
 ## Roadmap / TODO
-- **One-command deploy + teardown** for the whole stack, backed by an aggregated `env.mk` in this repo holding every variable. Planned, not yet implemented.
-- Fix the broken make targets (`browseterm-dockerfiles` `build_snapshot_job`/`build_all`; `container-maker` `prod_*`; this repo's `dev_build`/`build_letsencrypt_issuer`).
+- **One-command deploy + teardown** — ✅ implemented: `make setup_fresh` / `make setup` / `make teardown` / `make teardown_all`, backed by the aggregated `env.mk` + `scripts/`. See **Quick start** above.
+- Fix the remaining broken make targets (`browseterm-dockerfiles` `build_snapshot_job`/`build_all`; `container-maker` `prod_*`).
 - Proper fix for the `init.py` NOTIFY-trigger loss.
 - Optional: consolidate the custom cert-manager into official jetstack cert-manager (internal CA issuer + ACME issuer for public LE), with Reloader for rotation.
 
