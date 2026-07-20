@@ -28,8 +28,8 @@ inactive past a threshold, or when an active user's terminal crashes. See `WORKS
 - [x] **Inactivity threshold — DECIDED: 1 week** (configurable).
 - [ ] **Activity tracking** — socket-ssh stamps `last_active_at` (Redis key w/ TTL or DB column) on WS connect / heartbeat / disconnect.
 - [ ] **Reaper CronJob** — queries DB for containers idle > 1 week and still `running` → save (reuse `saveContainer`) → delete pod → set status `HIBERNATED`. New job image + CronJob manifest.
-- [ ] **Resume flow** — on login/open, `create` branches: if the container row has `saved_image`, spin the pod **from that image**; else base image. (Reuses create path; replaces the buggy `_update_pod_image`-during-save.)
-- [ ] **Drop `_update_pod_image` from save** (Option B) — save no longer restarts the live terminal; restore happens only on the explicit resume above.
+- [ ] **Resume flow** — on login/open of a HIBERNATED container, `create` branches: if the row has `saved_image`, spin the pod **from that image**; else base image. (Reuses create path.) This is ADDITIVE to crash recovery below, not a replacement.
+- [x] **Keep + fixed `_update_pod_image` (crash recovery, NOT dropped)** — decided to keep it: it points the live pod at the saved image so the kubelet restarts a *crashed* container from the snapshot immediately (in-place recovery for an active user, no resume step). Fixed the missing `{repo_name}/` prefix that was causing ImagePullBackOff. Note: patching the image triggers an immediate restart, and it restores to the last save point.
 - [ ] **Crash detection + recovery** — `status_sidecar` (already in every pod) detects an active user's pod died → recover (recreate from `saved_image`).
 - [ ] **New container statuses** — e.g. `HIBERNATED`, `RESUMING` (extend the enum + migration + re-apply trigger).
 - [ ] Write `WORKSPACE_LIFECYCLE.md` (design doc).
