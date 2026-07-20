@@ -23,13 +23,15 @@ Save is **not** for create. It exists to persist a workspace so it can be restor
 inactive past a threshold, or when an active user's terminal crashes. See `WORKSPACE_LIFECYCLE.md`
 (to be written).
 
-- [ ] ⚠️ **Decide persistence model:** PVC-backed (cheap crash-restart, fs survives) vs image-snapshot (frees resources on hibernate) vs **hybrid** (PVC live + image-snapshot on hibernate — recommended).
+- [x] **Persistence model — DECIDED: image-snapshot** (what save already produces). Hibernate = delete the pod; resume = recreate from `saved_image`. No PVC/hybrid.
+- [x] **Reaper — DECIDED: Kubernetes CronJob** (a new small job component, same pattern as cert-manager — NOT a third-party tool; it's our code that sweeps for idle terminals on a schedule).
+- [x] **Inactivity threshold — DECIDED: 1 week** (configurable).
 - [ ] **Activity tracking** — socket-ssh stamps `last_active_at` (Redis key w/ TTL or DB column) on WS connect / heartbeat / disconnect.
-- [ ] **Resume flow** — `create` branches: if the container row has `saved_image`, spin the pod **from that image**; else base image. (Reuses create path.)
-- [ ] **Reaper controller** — finds terminals idle > threshold → save → delete pod → set status `HIBERNATED`. ⚠️ CronJob vs in-process loop in browseterm-server.
-- [ ] **Crash detection + recovery** — `status_sidecar` (already in every pod) detects an active user's pod died → recover (restart from PVC or rebuild from `saved_image`).
-- [ ] **New container statuses** — e.g. `HIBERNATED`, `RESUMING`, `CRASHED` (extend the enum + migrations + trigger).
-- [ ] ⚠️ Decide the **inactivity threshold** value.
+- [ ] **Reaper CronJob** — queries DB for containers idle > 1 week and still `running` → save (reuse `saveContainer`) → delete pod → set status `HIBERNATED`. New job image + CronJob manifest.
+- [ ] **Resume flow** — on login/open, `create` branches: if the container row has `saved_image`, spin the pod **from that image**; else base image. (Reuses create path; replaces the buggy `_update_pod_image`-during-save.)
+- [ ] **Drop `_update_pod_image` from save** (Option B) — save no longer restarts the live terminal; restore happens only on the explicit resume above.
+- [ ] **Crash detection + recovery** — `status_sidecar` (already in every pod) detects an active user's pod died → recover (recreate from `saved_image`).
+- [ ] **New container statuses** — e.g. `HIBERNATED`, `RESUMING` (extend the enum + migration + re-apply trigger).
 - [ ] Write `WORKSPACE_LIFECYCLE.md` (design doc).
 
 ---
