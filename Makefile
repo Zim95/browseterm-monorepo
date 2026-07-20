@@ -1,12 +1,28 @@
 include env.mk
 
-dev_build:
-	./scripts/development/dev_build.sh $(REPO_NAME) $(USER_NAME) $(NAMESPACE) $(CERT_MANAGER_HOST_DIR)
+# One-command deploy / teardown (Docker Desktop). See scripts/ and README §"Development Setup".
+# First-time (creates + seeds the DB — DESTRUCTIVE): make setup_fresh
+# Re-deploy (keeps data):                            make setup
+
+setup:            ## deploy the whole stack (skips DB init)
+	./scripts/setup.sh
+
+setup_fresh:      ## first-time deploy incl. destructive DB init + seed
+	./scripts/setup.sh --fresh
+
+teardown:         ## remove the app stack + namespace (leaves MetalLB/ingress)
+	./scripts/teardown.sh
+
+teardown_all:     ## also remove cluster-scoped infra (MetalLB, ingress-nginx)
+	./scripts/teardown.sh --all
+
+gen_env:          ## regenerate each submodule's env.mk/.env from the aggregated env.mk
+	./scripts/gen-env.sh
+
+letsencrypt_issuer: ## apply the production Let's Encrypt ClusterIssuers (needs official cert-manager + a public domain)
+	kubectl apply -f 02_cluster_infra/letsencrypt-issuer.yaml
 
 detect_language:
 	python 01_language_detection/generate_language_representation.py
 
-build_letsencrypt_issuer:
-	
-
-.PHONY: dev_build detect_language
+.PHONY: setup setup_fresh teardown teardown_all gen_env letsencrypt_issuer detect_language
