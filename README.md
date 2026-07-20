@@ -73,6 +73,28 @@ $ git submodule update --init --recursive
 
 # Development Setup Guide (Docker Desktop, step-by-step)
 
+## Quick start (one command)
+
+Everything below is automated. Fill in one config file and run one command:
+
+```bash
+cp env.mk.example env.mk        # then edit env.mk: set REPO_PASSWORD + the GOOGLE/GITHUB OAuth secrets
+make setup_fresh                # first time: deploys the whole stack AND creates+seeds the DB (destructive)
+# on later re-deploys (keep your data):
+make setup
+```
+
+`make setup` fans the single aggregated `env.mk` out into each submodule's own config
+(`scripts/gen-env.sh`), then runs the ordered deploy in `scripts/setup.sh` (cluster infra → data tier →
+cert-manager → images → services → starts the manual apps), non-interactively. Tear it all down with
+`make teardown` (or `make teardown_all` to also remove MetalLB/ingress). You still do the sudo
+`/etc/hosts` + `portfwd.sh` step yourself (§11) — it needs an interactive sudo.
+
+The step-by-step guide below is the **same sequence, by hand** — read it to understand what `make setup`
+does and to troubleshoot.
+
+---
+
 This is the **actual, end-to-end local dev setup** on Docker Desktop's built-in Kubernetes, in the order you run it, with the reasoning behind each step. Each service also has its own README with the full `env.mk` reference — this guide ties them together.
 
 > **Cluster note:** These steps target **Docker Desktop**. The project's other docs (`00_docs/multipass_cluster.md`) describe a Multipass/k3s cluster; a few values differ between the two environments and are called out below (MetalLB pool, local access). The canonical shared values used here:
