@@ -15,7 +15,7 @@ fi
 set -a; source env.mk; set +a
 
 # In-cluster service DNS (same-namespace short names) + constants.
-PG_HOST_INCLUSTER="browseterm-pg-service"
+PG_HOST_INCLUSTER="browseterm-pg-service.browseterm.svc.cluster.local"
 REDIS_HOST_INCLUSTER="browseterm-redis-service"
 CM_DEV_HOST="container-maker-development-service"
 CM_DEV_PORT="50052"
