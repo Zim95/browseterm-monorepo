@@ -86,7 +86,7 @@ The terminal page already has an `ads-sidebar` with placeholder `ad-banner`s.
 - [ ] `browseterm-db/init.py` drops the NOTIFY triggers on autogenerate — re-created by hand; needs a proper fix (model-level DDL event or preserved migration).
 - [ ] `status_sidecar` has **no tests** — add dummy-call coverage (mock k8s watch + `update_container_status`).
 - [ ] Integration suites unverified: container-maker `tests/k8s/integration/*` (incl. stale `test_job_manager`), browseterm-server backend `tests/integration/*` (`test_save_status_listener`, `test_save_container_service`). Run steps documented; wire into CI.
-- [ ] Secret hygiene: `REPO_PASSWORD` (real Docker Hub pw) sits plaintext in `env.mk` → move to k8s Secret + rotate to an access token.
+- [ ] Per-user repo credentials: `REPO_NAME`/`REPO_PASSWORD` are **per-user** — each user pushes snapshots to their own registry, so there is NO single global repo password to secretize. The values in `env.mk` are a dev stand-in. Future: source per-user creds from the user's settings and thread them into the save gRPC → container-maker → snapshot Job.
 - [ ] Drop pod-level `privileged=True` where not required.
 - [ ] Reconcile MetalLB (IPs not host-reachable locally; we use port-forward) into a coherent local story.
 - [ ] Optional: replace custom cert-manager with official jetstack cert-manager (CA issuer for mTLS + ACME for public TLS) + Reloader.
@@ -159,9 +159,8 @@ A **demoable MVP** (0, 1, minimal 2, 5) is far closer — **~20–25 dev-days**.
 ### Tomorrow's picks
 
 **Easy wins (≤1 day each, low-risk, high-value):**
-- [ ] **`PYTHONUNBUFFERED=1`** on the Python deployments (~0.25d) — instant live logs; would've saved hours of the save debugging.
+- [x] **`PYTHONUNBUFFERED=1`** on the Python deployments — done (baked in Dockerfiles + applied live).
 - [ ] **Verify save end-to-end** (~0.5d + any small fixes) — the last confirmation; unblocks the lifecycle work.
-- [ ] **Secret hygiene**: move `REPO_PASSWORD` from `env.mk` to a k8s Secret (~0.5d).
 - [ ] **`status_sidecar` tests** — dummy-call coverage mirroring snapshot_job (~0.5–1d).
 - [ ] **Persistence-model decision** for the lifecycle — PVC vs image vs hybrid (~0.5d; a decision, not code, but it unblocks #1).
 
