@@ -90,10 +90,6 @@ cert-manager → images → services → starts the manual apps), non-interactiv
 `make teardown` (or `make teardown_all` to also remove MetalLB/ingress). You still do the sudo
 `/etc/hosts` + `portfwd.sh` step yourself (§11) — it needs an interactive sudo.
 
-To verify the one-command deploy itself works end to end, run `make test` (see §Testing) — it does a
-from-scratch `setup_fresh`, checks the stack is actually serving, then `teardown`s. **Destructive**
-(wipes the DB + namespace), so only run it on a throwaway cluster.
-
 The step-by-step guide below is the **same sequence, by hand** — read it to understand what `make setup`
 does and to troubleshoot.
 
@@ -373,13 +369,7 @@ DB-backed tests run against a **live Postgres on a separate test database**.
 - `browseterm-server` — `tests/integration/containers/test_resume_container.py` (resume recreates
   from `saved_image` and persists the new Service IP — a regression guard — plus the save handler).
 
-**One-command deploy test:** `make test` (→ `scripts/test.sh`) runs the whole thing end to end —
-`setup_fresh` → assert every deployment is available and that browseterm-server (`:9999`) and
-socket-ssh (`:8000`) are actually serving → `teardown`. It's the integration test for the
-one-command deploy/teardown itself. **DESTRUCTIVE** (drops+seeds the DB, deletes the namespace) —
-run only on a throwaway cluster, never against a workspace you care about.
-
-See `TODOPLAN.md` for the CI plan.
+CI (GitHub Actions, per-repo, on push) will run these suites — see `TODOPLAN.md` for the plan.
 
 ## Roadmap / TODO
 - **One-command deploy + teardown** — ✅ implemented: `make setup_fresh` / `make setup` / `make teardown` / `make teardown_all`, backed by the aggregated `env.mk` + `scripts/`. See **Quick start** above.

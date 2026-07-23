@@ -19,13 +19,10 @@ teardown_all:     ## also remove cluster-scoped infra (MetalLB, ingress-nginx)
 gen_env:          ## regenerate each submodule's env.mk/.env from the aggregated env.mk
 	./scripts/gen-env.sh
 
-test:             ## END-TO-END deploy test (DESTRUCTIVE): setup_fresh -> verify serving -> teardown
-	./scripts/test.sh
-
 letsencrypt_issuer: ## apply the production Let's Encrypt ClusterIssuers (needs official cert-manager + a public domain)
 	kubectl apply -f 02_cluster_infra/letsencrypt-issuer.yaml
 
 detect_language:
 	python 01_language_detection/generate_language_representation.py
 
-.PHONY: setup setup_fresh teardown teardown_all gen_env test letsencrypt_issuer detect_language
+.PHONY: setup setup_fresh teardown teardown_all gen_env letsencrypt_issuer detect_language
