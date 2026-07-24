@@ -1,0 +1,125 @@
+# Loki — log aggregation store (Observability, OBSERVABILITY.md Pillar 1).
+# Deploy:   kubectl apply -f 02_cluster_infra/loki.yaml   (or `make observability`)
+# Namespace: observability. HTTP API on :3100 (svc `loki`). Alloy pushes here; Grafana queries it.
+#
+# Single-binary mode with FILESYSTEM storage on a PVC — simplest for the local docker-desktop
+# cluster. Retention 14d.
+# ⚠️ PRODUCTION: swap the filesystem storage for S3 pointing at the existing MinIO
+#   (minio-service.browseterm.svc.cluster.local:9000, creds in the `minio-creds` secret) and
+#   pre-create a "loki" bucket (mirror the minio-createbucket Job in minio.yaml).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observability
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loki-config
+  namespace: observability
+data:
+  config.yaml: |
+    auth_enabled: false
+    server:
+      http_listen_port: 3100
+    common:
+      instance_addr: 127.0.0.1
+      path_prefix: /loki
+      storage:
+        filesystem:
+          chunks_directory: /loki/chunks
+          rules_directory: /loki/rules
+      replication_factor: 1
+      ring:
+        kvstore:
+          store: inmemory
+    schema_config:
+      configs:
+        - from: 2020-10-24
+          store: tsdb
+          object_store: filesystem
+          schema: v13
+          index:
+            prefix: index_
+            period: 24h
+    limits_config:
+      retention_period: 336h        # 14 days
+      reject_old_samples: false
+      # email is PII (the `user` field) — keep retention/access in mind.
+    compactor:
+      working_directory: /loki/compactor
+      retention_enabled: true
+      delete_request_store: filesystem
+    analytics:
+      reporting_enabled: false
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: loki-pvc
+  namespace: observability
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loki
+  namespace: observability
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate          # single writer on a RWO PVC
+  selector:
+    matchLabels:
+      app: loki
+  template:
+    metadata:
+      labels:
+        app: loki
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001        # so the loki user can write the PVC
+      containers:
+        - name: loki
+          image: grafana/loki:3.2.1
+          args: ["-config.file=/etc/loki/config.yaml"]
+          ports:
+            - containerPort: 3100
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 3100
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          volumeMounts:
+            - name: config
+              mountPath: /etc/loki
+            - name: storage
+              mountPath: /loki
+      volumes:
+        - name: config
+          configMap:
+            name: loki-config
+        - name: storage
+          persistentVolumeClaim:
+            claimName: loki-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: loki
+  namespace: observability
+spec:
+  selector:
+    app: loki
+  ports:
+    - name: http
+      port: 3100
+      targetPort: 3100

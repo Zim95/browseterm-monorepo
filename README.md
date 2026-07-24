@@ -371,6 +371,36 @@ DB-backed tests run against a **live Postgres on a separate test database**.
 
 CI (GitHub Actions, per-repo, on push) will run these suites — see `TODOPLAN.md` for the plan.
 
+## Observability (logs) — Loki + Alloy + Grafana
+
+Every service emits **structured JSON logs to stdout** (Python via a shared `logging_setup`,
+socket-ssh via `pino`), each line tagged with a `request_id` correlation id that's threaded across
+services (HTTP → gRPC metadata `x-request-id` → snapshot-Job `REQUEST_ID` env). The stack that
+collects and views them lives in `02_cluster_infra/` and runs in its own `observability` namespace:
+
+- **Loki** (`loki.yaml`) — log store, single-binary, filesystem PVC (dev). ⚠️ For prod, swap to S3
+  against the existing MinIO (see the comment in `loki.yaml`).
+- **Alloy** (`alloy.yaml`) — a DaemonSet that tails every pod's stdout via the k8s API, labels by
+  `namespace/app/pod/container`, and pushes to Loki. **No app changes needed.**
+- **Grafana** (`grafana.yaml`) — UI with the Loki datasource auto-provisioned.
+
+Deploy (opt-in; not part of `make setup`):
+```bash
+make observability          # applies loki.yaml + alloy.yaml + grafana.yaml
+# view Grafana:
+kubectl port-forward -n observability svc/grafana 3000:3000   # http://localhost:3000  (admin/admin)
+make observability_teardown # removes the stack + namespace
+```
+
+Query in Grafana → Explore → Loki (labels are low-cardinality; `request_id`/`user` are parsed from
+the JSON body with `| json`, never labels):
+```logql
+{namespace="browseterm"} | json | request_id="<id>"        # one request across ALL services, in order
+{app="container-maker-development"} | json | level="ERROR"  # a service's errors
+```
+Debug loop: a failed container's row has `last_request_id` → paste it into the first query → see the
+whole failing request end-to-end. (Note: `user` is an email — mind Loki retention/access.)
+
 ## Roadmap / TODO
 - **One-command deploy + teardown** — ✅ implemented: `make setup_fresh` / `make setup` / `make teardown` / `make teardown_all`, backed by the aggregated `env.mk` + `scripts/`. See **Quick start** above.
 - Fix the remaining broken make targets (`browseterm-dockerfiles` `build_snapshot_job`/`build_all`; `container-maker` `prod_*`).

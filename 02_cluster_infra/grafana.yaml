@@ -1,0 +1,75 @@
+# Grafana — the UI over Loki (Observability).
+# Deploy:   kubectl apply -f 02_cluster_infra/grafana.yaml   (or `make observability`)
+# View:     kubectl port-forward -n observability svc/grafana 3000:3000  ->  http://localhost:3000
+#           login admin / admin  (⚠️ DEV creds — change GF_SECURITY_ADMIN_PASSWORD for prod)
+# The Loki datasource is auto-provisioned. Explore -> Loki, then e.g.:
+#   {namespace="browseterm"} | json | request_id="<id>"     # one request across all services
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  namespace: observability
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Loki
+        type: loki
+        access: proxy
+        url: http://loki.observability.svc.cluster.local:3100
+        isDefault: true
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: observability
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      containers:
+        - name: grafana
+          image: grafana/grafana:11.3.0
+          env:
+            - name: GF_SECURITY_ADMIN_USER
+              value: admin
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              value: admin        # ⚠️ DEV ONLY — replace with a Secret for prod
+            - name: GF_AUTH_ANONYMOUS_ENABLED
+              value: "false"
+          ports:
+            - containerPort: 3000
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          volumeMounts:
+            - name: datasources
+              mountPath: /etc/grafana/provisioning/datasources
+      volumes:
+        - name: datasources
+          configMap:
+            name: grafana-datasources
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: observability
+spec:
+  selector:
+    app: grafana
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
