@@ -122,6 +122,69 @@ installed. The manifests are written to be correct regardless.
 
 ### Not yet done (rest of §7 isolation)
 
-`ResourceQuota` + `LimitRange` per namespace, pod-security hardening (drop capabilities, seccomp,
-no hostPath/hostNetwork), static policies for the fixed `browseterm`/`observability` namespaces, and
-the heavier **gVisor/Kata** sandbox.
+Pod-security hardening (drop capabilities, seccomp, no hostPath/hostNetwork), static policies for the
+fixed `browseterm`/`observability` namespaces, and the heavier **gVisor/Kata** sandbox.
+
+---
+
+# ResourceQuota + LimitRange — per-tenant resource caps
+
+Same §7 isolation goal, same template-loader pattern as the NetworkPolicies above.
+
+## 1. Problem faced
+
+Network isolation stops a tenant *reaching* other things; it does nothing about a tenant *consuming*
+everything. A user's root shell (or a `fork` bomb / `stress` / a mining job) can request unbounded
+CPU/memory or spawn unbounded pods, starving the node and every **other tenant** on it — a
+noisy-neighbor + DoS + runaway-cost problem. Kubernetes' default is **no limit** on what a namespace
+may consume in aggregate. We set per-container limits in the pod spec today, but nothing enforces a
+**namespace-wide total**, and nothing stops a client from omitting or inflating those per-container
+values.
+
+A second requirement pulls the other way: we want users to **resize their resources** (upgrade /
+downgrade their plan). So the cap can't be a permanent wall baked in at creation — it has to track
+the user's current entitlement.
+
+## 2. Solution thought of
+
+Two complementary Kubernetes objects per user namespace:
+
+- **ResourceQuota** — the namespace-wide **total** cap: aggregate `requests/limits.cpu/memory`,
+  total `requests.storage`, and object counts (`pods`, `persistentvolumeclaims`). This is the real
+  new protection — the per-tenant DoS / cost bound.
+- **LimitRange** — per-**container** `default` / `defaultRequest` / `max`. Two jobs: give every
+  container a sane ceiling it can't exceed, *and* supply defaults — because once the quota sets
+  `requests.*`/`limits.*`, a pod that omits them would be **rejected**; the LimitRange defaults are
+  what let such pods through. (LimitRange bounds each pod; ResourceQuota bounds the sum.)
+
+**Resizing is not hampered — this is the mechanism for it.** Both objects are *mutable*. The numbers
+come from a **tier** (`resource_config.TIERS`, e.g. `free` / `pro`), applied at namespace creation
+and **patched** when the plan changes (`update_resource_limits`). So "resize a user" = "swap the tier
+numbers and re-apply". The tier numbers will eventually be driven by the payments/subscription
+service. Direction semantics:
+- **Increase** — raise the quota *first*, then grow/recreate the pod (a pod exceeding the current
+  quota is rejected).
+- **Decrease** — lowering the quota does **not** evict running pods that now exceed it; the smaller
+  cap applies to the **next pod (re)created**. That fits BrowseTerm's recreate-on-resume model — a
+  downgrade lands on the next resume.
+
+## 3. Implementation of the solution
+
+- **`manifests/user_namespace_quota.yaml`** — `ResourceQuota` (`tenant-quota`) + `LimitRange`
+  (`tenant-limits`) as one template; placeholders `${NAMESPACE}` + the full tier value set
+  (`${MAX_PODS}`, `${TOTAL_CPU_LIMITS}`, `${DEFAULT_CPU}`, `${MAX_MEMORY_PER_CONTAINER}`, …).
+- **`resource_config.py`** — `TIERS` (`free`, `pro`) as the full substitution sets, `DEFAULT_TIER`,
+  and `tier_substitutions(namespace, tier)` (unknown tier → default).
+- **`CreateNamespaceDataClass.tier`** (default `"free"`) — threads the plan through namespace create.
+- **`NamespaceManager`** — `create` now also calls `_apply_resource_limits(ns, tier)`;
+  `update_resource_limits(ns, tier)` is the resize/plan-change path. Both share
+  `_render_and_apply_resource_limits`, which **creates each object, and on `409` patches** it to the
+  (possibly new) tier numbers — so create is idempotent and update re-syncs.
+- **Tests** — `tests/unit/resources/test_resource_limits.py`: template renders per tier with no
+  leftover placeholders, quota carries the tier numbers, LimitRange has default+max, pro > free,
+  unknown tier falls back, and create applies both objects / falls back to patch on 409 / update
+  patches with the new tier's numbers.
+
+Unlike NetworkPolicy, **ResourceQuota + LimitRange ARE enforced by vanilla Kubernetes** (the
+scheduler/quota admission controllers), including on docker-desktop — so this one is verifiable
+locally.
