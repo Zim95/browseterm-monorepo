@@ -26,18 +26,24 @@ small user count, and the per-tenant ResourceQuota/LimitRange keep one box from 
 
 ## 2. Why we disable k3s's bundled bits
 
-k3s bundles **Traefik** (ingress), **servicelb** (load balancer) and **local-path** (storage). We
-install k3s with all three **disabled** (`--disable traefik --disable servicelb --disable local-storage`)
-and bring our own:
+k3s bundles **Traefik** (ingress) and **servicelb** (load balancer). We install k3s with **those two
+disabled** (`--disable traefik --disable servicelb`) and bring our own:
 
 - **ingress-nginx** (not Traefik) — our terminal streaming relies on nginx-specific ingress annotations
   (`nginx.ingress.kubernetes.io/proxy-read-timeout`, `nginx.org/websocket-services`) that keep the
   socket-ssh **WebSocket** alive. Re-implementing those on Traefik is avoidable risk.
 - **MetalLB** (not servicelb) — matches the existing `setup.sh`; works fine on a single node. (On a
-  single cloud node you *could* simplify to servicelb; not required.)
-- **MinIO** (not local-path) — snapshots live in object storage now; the local PVC path is retired.
+  single cloud node you *could* simplify to servicelb; not required.) MetalLB's IP pool must be on the
+  VM's subnet — set `METALLB_POOL=192.168.64.200-192.168.64.250` (the Multipass `192.168.64.x` network).
 
-Keeping our own stack means the existing manifests and `setup.sh` deploy unchanged.
+> **KEEP k3s's `local-path` (do NOT `--disable local-storage`).** It's the default StorageClass, and
+> the datastores need dynamic provisioning: **MinIO's PVC** (and any PVC without a matching static PV)
+> stays unbound and the pod Pending without it. (The *snapshot* local-PVC path is retired — MinIO owns
+> snapshots — but that's unrelated to k3s's `local-path` provisioner, which the datastores rely on.)
+
+Keeping our own stack means the existing manifests and `setup.sh` deploy unchanged. Two env.mk values
+must match the k3s cluster: `METALLB_POOL` (above) and `REDIS_DATA_DIR` must be an **absolute** path
+(e.g. `/data`) — a relative value makes Redis's `hostPath` PV mount fail.
 
 ## 3. How to stand it up
 

@@ -50,9 +50,12 @@ if multipass exec "$VM" -- test -f /etc/rancher/k3s/k3s.yaml 2>/dev/null; then
   step "k3s already installed in '$VM' — skipping"
 else
   step "Installing k3s ${K3S_VERSION} (Traefik + servicelb + local-storage disabled)"
+  # Disable Traefik + servicelb (we bring ingress-nginx + MetalLB). KEEP local-path (the default
+  # StorageClass): MinIO/Postgres/Redis PVCs need dynamic provisioning — disabling it leaves MinIO's
+  # PVC unbound and the pod Pending.
   multipass exec "$VM" -- bash -c \
     "curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION='${K3S_VERSION}' \
-       INSTALL_K3S_EXEC='--disable traefik --disable servicelb --disable local-storage --write-kubeconfig-mode=644' sh -"
+       INSTALL_K3S_EXEC='--disable traefik --disable servicelb --write-kubeconfig-mode=644' sh -"
 fi
 
 step "Waiting for the node to be Ready"
