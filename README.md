@@ -32,10 +32,15 @@ Here are all the services that browseterm has:
   
 **5. Browseterm-Dockerfiles:**  
     **Type:** Docker Image(s).  
-    **Description:** There are multiple images to build here:  
-        - **Linux Images:** These are our linux images. Right now, we only have ubuntu.  
-        - **Status Sidecar:** This is the status sidecar. We need to build this image to update status of our containers. This will act as the status monitor sidecar container.  
-        - **Snapshot Job:** A run-to-completion Kubernetes Job that snapshots a container's filesystem into a pushable image. (Replaces the older, deprecated Snapshot Sidecar.)  
+    **Description:** The user-facing terminal images. Right now, we only have ubuntu (the linux image the user's shell runs). *(The status_sidecar and snapshot_job that used to live here have moved to `browseterm_workload` — see below.)*  
+
+**5b. Browseterm-Workload:**  
+    **Type:** Platform/background workloads (not request-serving).  
+    **Description:** One repo housing the four credentialed background components, deployed into a trusted namespace the tenant cannot reach:  
+        - **status_monitor:** a single cluster-wide **Deployment** that watches every user pod and mirrors its phase into the DB. Replaces the old per-pod **status_sidecar** (which forced DB credentials into the untrusted user pod).  
+        - **snapshot_job:** a run-to-completion **Job** that builds+pushes a container's saved image from its MinIO snapshot.  
+        - **reaper:** an hourly **CronJob** that hibernates idle containers.  
+        - **cert-manager:** a **CronJob** that mints the internal gRPC mTLS certs (moved here from its own repo).  
   
 **6. Redis HA:**  
     **Type:** MicroService.  
@@ -47,7 +52,7 @@ Here are all the services that browseterm has:
   
 **8. Container Maker:**  
     **Type:** MicroService (GRPC server).  
-    **Description:** Implements the Container Maker Spec. Uses the Kubernetes API to create/delete/save the user's linux container pods (ubuntu SSH container + status sidecar) and launches snapshot Jobs.  
+    **Description:** Implements the Container Maker Spec. Uses the Kubernetes API to create/delete/save the user's linux container pods (a single, unprivileged ubuntu SSH container — no sidecar) and launches snapshot Jobs. Stamps each pod with the `browseterm/managed` + `browseterm/container-id` labels the status_monitor watches.  
   
 **9. Browseterm-Server:**  
     **Type:** MicroService (main backend).  
@@ -161,12 +166,8 @@ EOF
 ```
 > ⚠️ **Docker Desktop caveat:** the committed `02_cluster_infra/metallb-config.yaml` uses `192.168.64.x` — that's for the **Multipass** cluster. On Docker Desktop the node is on `192.168.65.x`, so use the pool above. **Also:** MetalLB's L2 IPs live inside the Docker Desktop VM network and are **not reachable from your Mac host** (a `curl`/`ping` to `192.168.65.200` from macOS times out). They *are* reachable in-cluster (which is what the per-container services need, since socket-ssh dials them internally). For reaching the app **from your Mac browser**, we use loopback aliases + port-forward instead — see §11. (On Multipass, the node IPs are host-reachable, so there MetalLB serves the browser directly.)
 
-## 5. Apply the shared snapshot volume
-```bash
-kubectl apply -f 02_cluster_infra/snapshot-pvc.yaml
-```
-*Why: the container "save" flow tars a container's filesystem onto a shared RWX volume that the snapshot Job then reads. This PVC is that volume.*
-> Fix applied: this manifest had a hardcoded `namespace: browseterm-new`; corrected to `browseterm`.
+## 5. Snapshot storage — MinIO only (no PVC)
+*The container "save" flow uploads a container's filesystem tarball to **MinIO** (object storage); the snapshot Job then reads it from there. The old shared RWX **PVC** path is retired — there is no `snapshot-pvc.yaml` step anymore. MinIO is applied as part of the "Cluster infra" step, and `STORAGE_LAYER` defaults to `minio` everywhere.*
 
 ## 6. Data tier
 
@@ -221,7 +222,7 @@ cd -
 *Why: browseterm-server (client) talks to container-maker (server) over **gRPC with mutual TLS**. Both ends are ours and internal, so this uses a **private CA**, not a public one. `cert-manager` is a CronJob that generates a CA + server + client cert bundle and stores them as `{service}-certs` Secrets. This is unrelated to browser/HTTPS certs (see the TLS/WSS section).*
 
 ```bash
-cd cert-manager           # env.mk: USER_NAME, REPO_NAME, NAMESPACE, HOST_DIR
+cd browseterm_workload/cert-manager   # env.mk: USER_NAME, REPO_NAME, NAMESPACE, HOST_DIR
 make prod_build           # the build script runs `docker login` itself and will prompt for your Docker Hub password on the first push
 make prod_setup           # creates the CronJob (schedule: Sundays 05:00)
 # certs are otherwise generated weekly — trigger one now:
@@ -234,15 +235,17 @@ kubectl get secrets -n browseterm | grep certs
 > **cert-manager MUST run (and the job complete) BEFORE container-maker**, or container-maker's pod can't mount its cert and won't become healthy.
 > Note: the cert Subject is the **short service name** (`CN=container-maker-development-service`) — same-namespace resolution — with no SAN, and the gRPC client connects by that same short name.
 
-## 8. Build the in-cluster images — `browseterm-dockerfiles`
-*Why: these are the images container-maker runs at runtime — the ubuntu SSH container (the user's terminal), the status_sidecar (writes the pod's status to the DB), and the snapshot_job (builds+pushes a container snapshot on save).*
+## 8. Build the in-cluster images + deploy the status_monitor
+*Why: the ubuntu SSH container is the user's terminal (built from `browseterm-dockerfiles`); the snapshot_job builds+pushes a container snapshot on save; the status_monitor is the central Deployment that watches every user pod and writes its status to the DB (it replaces the old per-pod status_sidecar).*
 ```bash
-cd browseterm-dockerfiles     # env.mk: USER_NAME, REPO_NAME (+ REPO_PASSWORD/SNAPSHOT_PATH for snapshot_job)
-make build_ubuntu
-make build_status_sidecar
-# build_snapshot_job / build_all are broken (point at a non-existent ./snapshot_job/build.sh); build it directly:
-cd snapshot_job && make prod_build && cd ..
-cd -
+# user terminal image
+cd browseterm-dockerfiles && make build_ubuntu && cd -   # env.mk: USER_NAME, REPO_NAME
+
+# snapshot_job image (now in browseterm_workload)
+cd browseterm_workload/snapshot_job && make prod_build && cd -
+
+# status_monitor: build + deploy (reads DB creds from the browseterm-db-credentials Secret via envFrom)
+cd browseterm_workload/status_monitor && make prod_build && make dev_setup && cd -
 ```
 > Fix applied: `Dockerfile.ubuntu` (here and in socket-ssh) had `RUN mkdir /var/run/sshd`, which fails on current `ubuntu:latest` ("File exists") → changed to `mkdir -p`.
 
@@ -337,7 +340,7 @@ With placeholder values, Google returns **`Error 401: invalid_client` / "The OAu
 (cd browseterm-server && make dev_teardown)
 (cd socket-ssh && make dev_teardown)
 (cd container-maker && make dev_teardown)
-(cd cert-manager && make prod_teardown)
+(cd browseterm_workload/cert-manager && make prod_teardown)
 (cd redis_ha && make dev_redis_single_teardown)
 (cd postgres_ha && make dev_pg_single_teardown)
 # then everything else
@@ -359,7 +362,8 @@ DB-backed tests run against a **live Postgres on a separate test database**.
 | browseterm-server | jest + `unittest` | frontend jest is self-contained; backend is integration (needs Postgres/Redis) |
 | browseterm-storage | `unittest` | MinIO mocked — no infra needed |
 | socket-ssh | jest | |
-| browseterm-dockerfiles / snapshot_job | `unittest` | see `snapshot_job/tests/README.md` |
+| browseterm_workload / snapshot_job | `unittest` | see `snapshot_job/tests/README.md` |
+| browseterm_workload / status_monitor | `unittest` | `make -C browseterm_workload/status_monitor test` |
 
 **Workspace-lifecycle coverage** (save → crash → resume, save → hibernate → resume):
 - `container-maker` — unit (mocked k8s client) in `tests/unit/resources/` (`test_update_pod_image`,
@@ -403,7 +407,7 @@ whole failing request end-to-end. (Note: `user` is an email — mind Loki retent
 
 ## Roadmap / TODO
 - **One-command deploy + teardown** — ✅ implemented: `make setup_fresh` / `make setup` / `make teardown` / `make teardown_all`, backed by the aggregated `env.mk` + `scripts/`. See **Quick start** above.
-- Fix the remaining broken make targets (`browseterm-dockerfiles` `build_snapshot_job`/`build_all`; `container-maker` `prod_*`).
+- Fix the remaining broken make targets (`container-maker` `prod_*`).
 - Proper fix for the `init.py` NOTIFY-trigger loss.
 - Optional: consolidate the custom cert-manager into official jetstack cert-manager (internal CA issuer + ACME issuer for public LE), with Reloader for rotation.
 
@@ -413,20 +417,19 @@ This monorepo aggregates **every BrowseTerm repository as a git submodule**, so 
 
 ### Services (deployed workloads)
 - **`browseterm-server`** — *MicroService — Python / FastAPI.* The main backend + web UI and the orchestrator. Handles OAuth login and sessions (Redis), talks to container-maker over gRPC/mTLS, reads/writes Postgres via `browseterm-db`, drives `cert-manager` jobs, and hands the browser the socket-ssh WebSocket URL. Served on `:9999`.
-- **`container-maker`** — *MicroService — Python / gRPC server.* Implements the `container-maker-spec` contract. Uses the Kubernetes API to create / delete / save the user's Linux container pods (ubuntu SSH container + status sidecar) and to launch snapshot Jobs. Listens on `:50052` (mTLS).
+- **`container-maker`** — *MicroService — Python / gRPC server.* Implements the `container-maker-spec` contract. Uses the Kubernetes API to create / delete / save the user's Linux container pods (a single, unprivileged ubuntu SSH container — no sidecar, no DB creds, no API token) and to launch snapshot Jobs. Stamps the `browseterm/managed` + `browseterm/container-id` labels the status_monitor watches. Listens on `:50052` (mTLS).
 - **`socket-ssh`** — *MicroService — Node.js.* The WebSocket ↔ SSH bridge that streams the terminal to the browser. Validates the server's one-time WS token against Redis, then opens an SSH session into the user's container. Listens on `:8000` (TLS terminated at the ingress in prod).
-- **`cert-manager`** — *MicroService — Kubernetes CronJob.* Mints the **internal gRPC mTLS** certificates (a private CA + server/client certs) that secure the browseterm-server ↔ container-maker channel, stored as `{service}-certs` secrets. (This is *not* the public/Let's Encrypt cert path — see the TLS/WSS section.)
+- **`browseterm_workload`** — *Platform/background workloads (trusted namespace).* One repo housing **status_monitor** (Deployment — central pod-status watcher, replaces the per-pod status_sidecar), **snapshot_job** (Job — builds+pushes saved images from MinIO), **reaper** (hourly CronJob — hibernates idle containers), and **cert-manager** (CronJob — internal gRPC mTLS certs, a private CA + server/client certs stored as `{service}-certs` secrets; *not* the public/Let's Encrypt path).
 
 ### Libraries (imported as dependencies — not deployed on their own)
-- **`browseterm-db`** — *Python library.* SQLAlchemy models (users, subscription_types, subscriptions, images, containers, orders), the CRUD `*Ops` classes, Alembic migrations, the Postgres `LISTEN/NOTIFY` listener, and the JSON state seeder. Consumed by browseterm-server, the status_sidecar, and the snapshot_job.
-- **`browseterm-storage`** — *Python library.* Storage abstraction for container filesystem snapshots, with `LocalPVCStorage` and `MinioStorage` backends selected via a `StorageLayer` enum. Consumed by container-maker (writes the tarball) and the snapshot_job (reads it).
+- **`browseterm-db`** — *Python library.* SQLAlchemy models (users, subscription_types, subscriptions, images, containers, orders), the CRUD `*Ops` classes, Alembic migrations, the Postgres `LISTEN/NOTIFY` listener, and the JSON state seeder. Consumed by browseterm-server, the status_monitor, and the snapshot_job.
+- **`browseterm-storage`** — *Python library.* Storage abstraction for container filesystem snapshots. **MinIO (object storage) is the only backend now** — the `LocalPVCStorage`/PVC path is retired. Consumed by container-maker (writes the tarball) and the snapshot_job (reads it).
 - **`container-maker-spec`** — *Python library — gRPC / protobuf contract.* The `.proto` definitions and generated stubs for the `ContainerMakerAPI` (list/create/get/delete/saveContainer). Shared by container-maker (server) and browseterm-server (client) via git dependency. No deployment — build-only.
 
 ### Images (built here, run by container-maker at runtime)
-- **`browseterm-dockerfiles`** — *Docker image builds.* Produces the images container-maker launches:
+- **`browseterm-dockerfiles`** — *Docker image builds.* Produces the user terminal image:
     - **ubuntu** (`ssh_ubuntu`) — the user's actual Linux terminal container (SSH server).
-    - **status_sidecar** — injected next to each user container; watches the pod and writes its status to `browseterm-db` (which fires the NOTIFY trigger → live UI updates).
-    - **snapshot_job** — a run-to-completion Kubernetes **Job** that reads a container's fs snapshot (via `browseterm-storage`), builds a `FROM scratch` image, pushes it, and records `saved_image` in the DB. (Replaces the deprecated snapshot_sidecar.)
+- Status writing is no longer a per-pod sidecar: the central **`status_monitor`** (in `browseterm_workload`) watches every user pod via the k8s API and writes status to `browseterm-db` (which fires the NOTIFY trigger → live UI updates). The **`snapshot_job`** (also in `browseterm_workload`) reads a container's fs snapshot from MinIO, builds a `FROM scratch` image, pushes it, and records `saved_image` in the DB.
 
 ### Infrastructure (Kubernetes deploy manifests)
 - **`postgres_ha`** — *Infra — K8s manifests.* Deploys the database. Single `postgres:15` instance today (exposes `browseterm-pg-service:5432`); full HA (etcd/Patroni/HAProxy) is WIP.
