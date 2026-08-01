@@ -58,8 +58,8 @@ metadata: { name: l2advertisement, namespace: metallb-system }
 spec: { ipAddressPools: [first-pool] }
 EOF
 
-step "Cluster infra: snapshot PVC + MinIO"
-kubectl apply -f 02_cluster_infra/snapshot-pvc.yaml
+step "Cluster infra: MinIO (object storage for snapshots)"
+# Local PVC snapshot storage is retired — snapshots always live in MinIO now.
 kubectl apply -f 02_cluster_infra/minio.yaml
 
 step "Postgres (postgres_ha)"
@@ -95,8 +95,8 @@ step "Redis (redis_ha)"
 make -C redis_ha dev_redis_single_setup
 
 step "cert-manager (internal mTLS) + trigger a cert job now"
-make -C cert-manager prod_build
-make -C cert-manager prod_setup
+make -C browseterm_workload/cert-manager prod_build
+make -C browseterm_workload/cert-manager prod_setup
 kubectl create job --from=cronjob/"${CERT_MANAGER_CRON_JOB_NAME}" "${CERT_MANAGER_CRON_JOB_NAME}-job" -n "${NS}" 2>/dev/null || true
 echo "  waiting for cert secret ${CONTAINER_MAKER_CERTS_SECRET_NAME} ..."
 for i in $(seq 1 30); do
@@ -104,10 +104,15 @@ for i in $(seq 1 30); do
   sleep 4
 done
 
-step "Build in-cluster images (browseterm-dockerfiles)"
+step "Build in-cluster images"
 make -C browseterm-dockerfiles build_ubuntu
-make -C browseterm-dockerfiles build_status_sidecar
-make -C browseterm-dockerfiles/snapshot_job prod_build
+make -C browseterm_workload/snapshot_job prod_build
+
+step "status_monitor (central pod-status watcher; replaces the per-pod status sidecar)"
+# Deployed once, cluster-wide. Reads DB creds from the browseterm-db-credentials Secret (created
+# above) via envFrom, and watches user pods across all namespaces.
+make -C browseterm_workload/status_monitor prod_build
+make -C browseterm_workload/status_monitor dev_setup
 
 step "Deploy services in order: container-maker → socket-ssh → browseterm-server"
 for svc in container-maker socket-ssh browseterm-server; do

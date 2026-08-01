@@ -42,12 +42,12 @@ REDIS_PASSWORD=${REDIS_PASSWORD}
 REDIS_DATA_DIR=${REDIS_DATA_DIR}
 EOF
 
-# ── cert-manager ──
-cat > cert-manager/env.mk <<EOF
+# ── cert-manager (now in browseterm_workload) ──
+cat > browseterm_workload/cert-manager/env.mk <<EOF
 USER_NAME=${USER_NAME}
 REPO_NAME=${REPO_NAME}
 NAMESPACE=${NAMESPACE}
-HOST_DIR=${ROOT}/cert-manager
+HOST_DIR=${ROOT}/browseterm_workload/cert-manager
 EOF
 
 # ── browseterm-dockerfiles (image builds + local snapshot_job runs) ──
@@ -66,12 +66,20 @@ SNAPSHOT_PATH=/mnt/snapshot
 POD_NAME=
 EOF
 
-# ── snapshot_job ──
-cat > browseterm-dockerfiles/snapshot_job/env.mk <<EOF
+# ── snapshot_job (now in browseterm_workload) ──
+cat > browseterm_workload/snapshot_job/env.mk <<EOF
 USER_NAME=${USER_NAME}
 REPO_NAME=${REPO_NAME}
 NAMESPACE=${NAMESPACE}
-HOST_DIR=${ROOT}/browseterm-dockerfiles/snapshot_job
+HOST_DIR=${ROOT}/browseterm_workload/snapshot_job
+EOF
+
+# ── status_monitor (central pod-status watcher; DB creds come from the k8s Secret via envFrom) ──
+cat > browseterm_workload/status_monitor/env.mk <<EOF
+USER_NAME=${USER_NAME}
+REPO_NAME=${REPO_NAME}
+NAMESPACE=${NAMESPACE}
+HOST_DIR=${ROOT}/browseterm_workload/status_monitor
 EOF
 
 # ── container-maker ──
@@ -155,5 +163,6 @@ TEST_DB_DATABASE=${PG_TEST_DB}
 SQL_ECHO=false
 EOF
 
-echo "Done. Generated env files for: postgres_ha, redis_ha, cert-manager, browseterm-dockerfiles,"
-echo "snapshot_job, container-maker, socket-ssh, browseterm-server, browseterm-db(.env)."
+echo "Done. Generated env files for: postgres_ha, redis_ha, browseterm-dockerfiles, container-maker,"
+echo "socket-ssh, browseterm-server, browseterm-db(.env), and browseterm_workload/{cert-manager,"
+echo "snapshot_job,status_monitor}."
