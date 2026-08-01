@@ -28,3 +28,6 @@
 [submodule "container-maker"]
 	path = container-maker
 	url = https://github.com/Zim95/container-maker.git
+[submodule "browseterm_workload"]
+	path = browseterm_workload
+	url = https://github.com/Zim95/browseterm_workload.git
