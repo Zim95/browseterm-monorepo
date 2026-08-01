@@ -56,7 +56,15 @@ else
 fi
 
 step "Waiting for the node to be Ready"
-multipass exec "$VM" -- sudo k3s kubectl wait --for=condition=ready node --all --timeout=120s
+# Poll (don't `kubectl wait --all`: it errors with "no matching resources found" in the split second
+# before the node registers, rather than waiting for it to appear).
+for i in $(seq 1 60); do
+  if multipass exec "$VM" -- sudo k3s kubectl get nodes --no-headers 2>/dev/null | grep -q " Ready "; then
+    echo "  ✅ node Ready"; break
+  fi
+  [ "$i" = 60 ] && { echo "  ⚠️  node not Ready after 180s"; exit 1; }
+  sleep 3
+done
 
 # ── 4. Confirm NetworkPolicy enforcement is present (the whole reason for k3s) ──
 step "k3s node + version"
