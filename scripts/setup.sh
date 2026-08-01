@@ -67,6 +67,18 @@ make -C postgres_ha dev_pg_single_setup
 kubectl rollout status deploy/browseterm-pg -n "${NS}" --timeout=120s 2>/dev/null || \
   kubectl wait --for=condition=ready pod/browseterm-pg -n "${NS}" --timeout=120s
 
+step "DB credentials Secret (browseterm-db-credentials)"
+# Single source of truth for the DB_* credentials the workload components (status_monitor, reaper,
+# snapshot_job) consume via envFrom -- so the password is no longer templated as a literal value
+# into each deployment manifest. Idempotent (create-or-update). DB_HOST is the in-cluster FQDN.
+kubectl create secret generic browseterm-db-credentials -n "${NS}" \
+  --from-literal=DB_HOST="browseterm-pg-service.${NS}.svc.cluster.local" \
+  --from-literal=DB_PORT="5432" \
+  --from-literal=DB_USERNAME="${PG_USER}" \
+  --from-literal=DB_PASSWORD="${PG_PASSWORD}" \
+  --from-literal=DB_DATABASE="${PG_DB}" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
 if [ "${FRESH}" = "1" ]; then
   step "browseterm-db migrate + seed (DESTRUCTIVE: init.py) + re-apply NOTIFY triggers"
   kubectl port-forward service/browseterm-pg-service -n "${NS}" 5432:5432 >/dev/null 2>&1 &
