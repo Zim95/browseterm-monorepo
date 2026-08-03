@@ -48,17 +48,29 @@ must match the k3s cluster: `METALLB_POOL` (above) and `REDIS_DATA_DIR` must be 
 ## 3. How to stand it up
 
 ```bash
-./scripts/setup.k3s.sh          # provisions the VM + single-node k3s + wires kubectl
-# then:
-./scripts/setup.sh              # deploys BrowseTerm (ingress-nginx + MetalLB + MinIO + services)
+./scripts/setup.k3s.sh              # 1. provision the VM + single-node k3s + wire kubectl
+./scripts/deploy.k3s.sh --fresh     # 2. deploy BrowseTerm onto it (PROD flow; --fresh inits the DB)
 ```
 
-`setup.k3s.sh` (idempotent) does: launch a Multipass VM → verify it has internet → install k3s (bundled
-bits disabled) → wait for Ready → pull the kubeconfig, rewrite the server IP to the VM's IP, merge it
-as the **`browseterm-k3s`** context → prove pods can reach the internet. Override defaults via env
-(`VM`, `CPUS`, `MEM`, `DISK`, `K3S_VERSION`).
+> Use **`deploy.k3s.sh`**, not the old `setup.sh`. `setup.sh` is the **docker-desktop dev flow**
+> (local images + `hostPath` live-mount + apps started by hand). k3s runs the **PROD flow**: built
+> images pulled from the registry, real entrypoints, no hostPath. They are different deployments (see
+> the dev-vs-prod table in the repo README).
+
+- **`setup.k3s.sh`** (idempotent): launch a Multipass VM → verify internet → install k3s (Traefik +
+  servicelb disabled, `local-path` kept) → wait Ready → wire the **`browseterm-k3s`** kubectl context →
+  prove pods reach the internet. Override via env (`VM`, `CPUS`, `MEM`, `DISK`, `K3S_VERSION`).
+- **`deploy.k3s.sh`**: gen-env → namespace → ingress-nginx → MetalLB + pool → MinIO → Postgres +
+  DB-credentials Secret (+ `--fresh` DB init) → Redis → cert-manager (+ trigger a cert job) →
+  **`build-images.sh`** (build + push all prod images) → deploy the services via their `prod_setup` →
+  wait for rollouts.
+- **`build-images.sh`**: build + push all prod images, with the Docker-Desktop-proxy workarounds baked
+  in (pre-pull bases + BuildKit + retries — see §7).
 
 Handy: `multipass shell browseterm-k3s` · `multipass stop browseterm-k3s` · `multipass delete --purge browseterm-k3s`.
+
+> Pushing images/commits needs the active gh account = **Zim95** (`gh auth switch --user Zim95`); it
+> tends to revert to another account → HTTP 403. Re-switch and retry.
 
 ## 4. Internet + the egress rule (important)
 
@@ -99,9 +111,35 @@ arch differs from your build arch** — e.g. building on arm64 but deploying to 
 > whatever node runs it — so **saved images are arch-locked** to that node's arch. On a single-node
 > cluster that's always one arch, so resume is fine; just don't move a saved image across arches.
 
-## 6. Prod is the same script
+## 6. Prod is the same flow
 
 Production is the *same* single-node k3s — run k3s (bundled bits disabled) on a self-owned cloud VM
-(e.g. Hetzner CX22, ~€4/mo) or a Raspberry Pi, then the same `setup.sh`. The only legitimate
-local-vs-prod differences: the `env.mk` values (creds/hosts/domain) and **TLS** (real domain +
-Let's Encrypt in prod; self-signed / none locally).
+(e.g. Hetzner CX22, ~€4/mo) or a Raspberry Pi, then `deploy.k3s.sh`. The only legitimate local-vs-prod
+differences: the `env.mk` values (creds/hosts/domain) and **TLS** (real domain + Let's Encrypt in
+prod; self-signed / none locally).
+
+## 7. Gotchas we hit migrating off docker-desktop (all fixed)
+
+These are docker-desktop-isms / single-node assumptions that surfaced on k3s. All are handled in the
+scripts/manifests now; listed so a re-run (or a prod bring-up) doesn't rediscover them.
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| MetalLB never assigns an external IP | `METALLB_POOL` was on docker-desktop's `192.168.65.x` | pool must be the VM subnet `192.168.64.x` (env.mk) |
+| MinIO pod stuck `Pending` (PVC unbound) | k3s installed with `--disable local-storage` → no default StorageClass | **keep** `local-path` (setup.k3s.sh) |
+| Redis `CrashLoopBackOff` (mount error) | `REDIS_DATA_DIR` was a **relative** hostPath (`browseterm`) | absolute path (`/data`) in env.mk |
+| container-maker `prod_build`/`prod_setup` missing/broken | it only ever had a **dev** deploy (hostPath + `tail -f`) | built its prod deployment (Dockerfile.deployment + manifest + scripts) |
+| container-maker `prod_setup`: `command not found: USER_NAME` | script `source`d a **Makefile-syntax** env.mk (`KEY = VALUE`) | pass make-expanded vars as args (like dev), don't source env.mk |
+| Image builds time out fetching base metadata | Docker Desktop's proxy (`http.docker.internal:3128`) is slow/flaky | pre-pull bases + **BuildKit** + retries (build-images.sh). Do **NOT** use `DOCKER_BUILDKIT=0` — the legacy builder can't resolve DNS through the proxy, so `apt-get` fails |
+| Image pulls into the VM are slow (~3–4 min each) | Docker Hub over the Multipass NAT | expected; pods pull in parallel. (Faster alt: build in the VM, or `docker save`→`k3s ctr images import`) |
+| browseterm-server `CrashLoop`: `poetry: command not found` | image installed poetry under `/root`, but the pod runs `runAsNonRoot`/uid 1000 | in-project venv + `chmod a+rX`, run uvicorn straight from `/app/.venv` (no poetry at runtime) |
+| browseterm-server never `Ready` (`/health` → 404) | probes hit `/health`, which the app doesn't serve | probes point at `/` (or add a real `/health`) |
+| `git push` → HTTP 403 | active gh account reverted off Zim95 | `gh auth switch --user Zim95`, retry |
+
+### Not yet correct (deliberately deferred)
+- **Tenant-isolation CIDRs.** `POD_CIDR`/`SERVICE_CIDR` still default to docker-desktop's `10.1/10.96`;
+  k3s uses `10.42.0.0/16` / `10.43.0.0/16`. Internet egress works regardless, but the
+  `allow-egress-internet-deny-internal` policy's internal carve-out is wrong until these are set — so a
+  user pod is **not yet blocked** from Postgres/other tenants. Set them, then re-run the isolation test.
+- **Multi-node data persistence.** The data tier (pg/redis/minio) is on node-local storage — see the §7
+  HA item in `TODOPLAN.md` (needs Longhorn / replicated storage before those pods can move across nodes).

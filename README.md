@@ -78,9 +78,25 @@ $ git submodule update --init --recursive
 
 # Development Setup Guide (Docker Desktop, step-by-step)
 
-## Quick start (one command)
+## Quick start
 
-Everything below is automated. Fill in one config file and run one command:
+There are **two** ways to run BrowseTerm, and they are different deployments:
+
+### A. Single-node k3s (current / prod-parity) — recommended
+Runs the **PROD flow** (built images from the registry, real entrypoints, no hostPath) on a real,
+NetworkPolicy-**enforcing** cluster — the same single-node k3s locally and in prod (self-owned VM /
+Raspberry Pi). This replaced docker-desktop. Full rationale + gotchas: **`00_docs/k3s_single_node.md`**.
+
+```bash
+cp env.mk.example env.mk        # set REPO_PASSWORD + OAuth secrets; METALLB_POOL on the VM subnet (192.168.64.x); REDIS_DATA_DIR absolute (/data)
+./scripts/setup.k3s.sh          # provision a Multipass VM + single-node k3s + wire kubectl (context browseterm-k3s)
+./scripts/deploy.k3s.sh --fresh # deploy the whole stack (PROD images); --fresh also inits the DB
+```
+
+### B. docker-desktop (legacy dev flow)
+The original **dev flow** (local images + `hostPath` live-mount + apps started by hand). Handy for
+live-editing code, but docker-desktop does **not** enforce NetworkPolicies, so isolation can't be
+validated there.
 
 ```bash
 cp env.mk.example env.mk        # then edit env.mk: set REPO_PASSWORD + the GOOGLE/GITHUB OAuth secrets
