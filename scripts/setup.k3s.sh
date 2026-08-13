@@ -69,6 +69,63 @@ for i in $(seq 1 60); do
   sleep 3
 done
 
+# ── 3.5 Install gVisor (runsc) + register it with k3s's containerd ──
+# WHY: user terminals are untrusted ROOT shells. runc shares the host kernel directly, so a kernel
+# CVE → container escape → the whole node + every other tenant. gVisor puts a user-space kernel
+# (Sentry) between the container and the host kernel. container-maker stamps user pods with
+# `runtimeClassName: gvisor` (USER_POD_RUNTIME_CLASS); this makes that class resolvable on the node.
+# The RuntimeClass object itself is applied by deploy.k3s.sh (a cluster resource, not a node one).
+# Idempotent: skips the download if runsc is already installed, only (re)writes the containerd
+# template + restarts k3s when the runsc runtime block is missing.
+step "Installing gVisor (runsc) in '$VM' and registering it with k3s containerd"
+multipass exec "$VM" -- sudo bash -s <<'GVISOR'
+set -euo pipefail
+ARCH="$(uname -m)"   # aarch64 on Apple Silicon, x86_64 on Intel — gVisor publishes both
+TMPL=/var/lib/rancher/k3s/agent/etc/containerd/config.toml.tmpl
+
+if command -v runsc >/dev/null 2>&1; then
+  echo "  runsc already installed ($(runsc --version | head -1))"
+else
+  echo "  downloading runsc + containerd-shim-runsc-v1 (${ARCH})"
+  URL="https://storage.googleapis.com/gvisor/releases/release/latest/${ARCH}"
+  workdir="$(mktemp -d)"; cd "$workdir"
+  for f in runsc containerd-shim-runsc-v1; do
+    wget -q "${URL}/${f}" "${URL}/${f}.sha512"
+  done
+  sha512sum -c runsc.sha512 containerd-shim-runsc-v1.sha512
+  chmod a+rx runsc containerd-shim-runsc-v1
+  mv runsc containerd-shim-runsc-v1 /usr/local/bin/
+  cd /; rm -rf "$workdir"
+  echo "  installed $(runsc --version | head -1)"
+fi
+
+# Register a `runsc` runtime with k3s's bundled containerd via a config template. `{{ template "base" . }}`
+# pulls in everything k3s would normally generate; we only append the runsc runtime handler.
+if [ -f "$TMPL" ] && grep -q 'runtimes.runsc' "$TMPL"; then
+  echo "  containerd template already has the runsc runtime — leaving k3s untouched"
+else
+  echo "  writing $TMPL with a runsc runtime block"
+  mkdir -p "$(dirname "$TMPL")"
+  cat > "$TMPL" <<'TOML'
+{{ template "base" . }}
+
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]
+  runtime_type = "io.containerd.runsc.v1"
+TOML
+  echo "  restarting k3s to pick up the new containerd config (brief blip; it comes back)"
+  systemctl restart k3s
+fi
+GVISOR
+
+step "Waiting for the node to be Ready again after the gVisor/k3s restart"
+for i in $(seq 1 60); do
+  if multipass exec "$VM" -- sudo k3s kubectl get nodes --no-headers 2>/dev/null | grep -q " Ready "; then
+    echo "  ✅ node Ready"; break
+  fi
+  [ "$i" = 60 ] && { echo "  ⚠️  node not Ready after 180s"; exit 1; }
+  sleep 3
+done
+
 # ── 4. Confirm NetworkPolicy enforcement is present (the whole reason for k3s) ──
 step "k3s node + version"
 multipass exec "$VM" -- sudo k3s kubectl get nodes -o wide
