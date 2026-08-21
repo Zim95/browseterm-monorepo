@@ -113,7 +113,11 @@ REDIS_USERNAME=${REDIS_USER}
 REDIS_PASSWORD=${REDIS_PASSWORD}
 REDIS_DB=${REDIS_DB}
 ALLOWED_ORIGINS_DEV=http://${INGRESS_HOST}:9999,http://${INGRESS_HOST},http://localhost:9999
-ALLOWED_ORIGINS_PROD=https://${INGRESS_HOST}
+# Derived from AUTH_REDIRECT_BASE_URI (the actual scheme+host the app is served on) rather
+# than hardcoded to https:// - a plain-HTTP local ingress needs http:// here or socket-ssh
+# rejects every WS handshake as a disallowed origin. A real HTTPS prod env.mk naturally gets
+# https:// here too, since AUTH_REDIRECT_BASE_URI would be https:// there as well.
+ALLOWED_ORIGINS_PROD=${AUTH_REDIRECT_BASE_URI}
 EOF
 
 # ── browseterm-server ──
@@ -146,6 +150,8 @@ POSTGRES_DB=${PG_DB}
 SOCKET_SSH_HOST=${SOCKET_SSH_HOST}
 SOCKET_SSH_WSS_URL=${SOCKET_SSH_WSS_URL}
 INGRESS_HOST=${INGRESS_HOST}
+COOKIE_SECURE=${COOKIE_SECURE}
+COOKIE_SAMESITE=${COOKIE_SAMESITE}
 EOF
 
 # ── browseterm-db (.env; migrations run from the host over a port-forward, so localhost) ──
