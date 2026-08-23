@@ -177,6 +177,52 @@ Auto-instrumentation (OTel) handles most of it, but our topology has two tricky 
 > Decision: make `request_id == trace_id` so the logs-based correlation (Pillar 1) and true
 > tracing (Pillar 3) converge on a single id the whole way through.
 
+> Decision: **Tempo over Jaeger.** We're already committing to the Grafana ecosystem (Loki for
+> logs, Grafana for dashboards); Tempo correlates with both by trace ID with the least friction.
+> Jaeger would mean a second, disconnected UI.
+
+### Detailed tracing rollout (supersedes the one-line Phase 3 bullet below)
+
+This expands the "Phase 3 — Traces" line in the Rollout plan into the actual step sequence,
+including the two things the terse version left out: what has to exist *before* tracing is useful
+at all, and how we'd know the phase actually succeeded (not just "traces exist somewhere").
+
+1. **Prerequisite — Pillar 2 (metrics/Grafana) has to be up first.** The `make observability`
+   target already exists and is unused — deploy Prometheus + Grafana before touching tracing. You
+   need somewhere to *see* spans land; standing up Tempo with no Grafana in front of it is wasted
+   motion.
+2. **Instrument the request entry point.** Add the OTel SDK to `browseterm-server`
+   (`opentelemetry-sdk` + the ASGI/FastAPI auto-instrumentation package) — this alone gets a span
+   per incoming HTTP request for free, no custom code yet. Configure the OTLP exporter to ship to
+   Tempo.
+3. **Propagate across the gRPC hop.** `container-maker`'s existing `RequestIdInterceptor` already
+   threads `x-request-id` through gRPC metadata (see Pillar 1) — extend that pattern with real W3C
+   `traceparent` propagation via the OTel gRPC instrumentation package, so a trace started in
+   `browseterm-server` continues as a *child span* inside `container-maker`, not a disconnected log
+   line correlated only by a shared string. Instrument `container-maker` itself the same way, so its
+   own internal steps (namespace lookup, pod resolution, Job creation) show up as spans under that
+   same trace.
+4. **Extend into the detached paths (the hard, valuable part).** The snapshot Job is a separate
+   Kubernetes Job process with its own direct DB writes — it doesn't inherit a request context
+   naturally. Pass the trace ID as a Job env var (same mechanism already used for `REQUEST_ID`) and
+   start a span in `snapshot_job/main.py` as a *child* of the originating save request's trace, not
+   a new disconnected trace. This is exactly the piece that would have made this session's
+   save-flow bugs (the Job-name collision, the timeout-vs-`active_deadline_seconds` mismatch, the
+   `REPO_PASSWORD` shift-by-one, the orphaned-Running-save reconciler) visibly diagnosable as one
+   trace instead of manually cross-referencing three processes' logs by request ID. Give the same
+   treatment to the reaper and status_monitor once those are actually exercised (hibernation
+   testing is still pending — see `progress_made.md`) — one causal chain for "detected idle
+   container → gRPC saveContainer → gRPC deleteContainer → DB mark_hibernated."
+5. **Acceptance test — close the loop.** Re-run this session's actual incidents (a slow save, a
+   stuck/orphaned Job) against the instrumented system and confirm each is diagnosable from a
+   single trace view. That's the definition of done for this phase, not "the Tempo pod is Running."
+
+> Prioritization note: tracing pays off most exactly when things *don't* work — it's the tool for
+> the next stuck-Job-starves-the-node incident, not something you'd notice during a clean
+> happy-path run. Worth doing steps 1–3 (browseterm-server + the gRPC hop) before the whole
+> save/hibernate/crash-sim flow is fully proven out, since that's the cheap part and would already
+> have shortened this session's debugging significantly.
+
 ---
 
 ## Pillar 4 — Expose observability to AI via MCP (the payoff)
@@ -208,7 +254,9 @@ Vision: an AI agent (Claude) debugs autonomously the way we did manually today �
   service; Grafana dashboards for resource health + save success/latency; first alerts (OOM, save
   failure rate).
 - **Phase 3 — Traces:** OTel SDK + Collector; Tempo; auto-instrument HTTP + gRPC; propagate trace
-  context across the gRPC hop and into the snapshot Job; link traces↔logs in Grafana.
+  context across the gRPC hop and into the snapshot Job; link traces↔logs in Grafana. See
+  "Detailed tracing rollout" under Pillar 3 above for the actual step-by-step sequence and the
+  acceptance test.
 - **Phase 4 — MCP for AI:** evaluate `grafana-mcp` (or build a thin MCP) exposing Loki/Prom/Tempo
   queries; wire it so an agent can pull a request's full lifecycle and debug it.
 
@@ -224,7 +272,7 @@ Vision: an AI agent (Claude) debugs autonomously the way we did manually today �
 ## Open questions / decisions to make
 
 - **Prometheus vs Grafana Mimir** for metrics storage (Prometheus is simpler to start).
-- **Tempo vs Jaeger** for traces (Tempo integrates tighter with the Grafana stack).
+- ~~Tempo vs Jaeger for traces~~ — **decided: Tempo** (see Pillar 3 above).
 - Retention + storage sizing for Loki/Tempo on the local cluster (start small, object storage in
   prod — we already run MinIO, which Loki/Tempo can use as their object store).
 - Managed vs self-hosted Grafana in production.

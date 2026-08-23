@@ -43,8 +43,12 @@ Grafana becomes the debugger; one `request_id`/`trace_id` end-to-end.
 - [ ] **Phase 0 (free win):** `PYTHONUNBUFFERED=1` on Python services so logs flush live.
 - [ ] **Logging:** structured JSON logs in all 4 services + `request_id` propagated HTTP→gRPC→Job→DB; deploy **Loki + Alloy + Grafana**; reconstruct a request from logs.
 - [ ] **Metrics:** **Prometheus** + kube-state-metrics + node-exporter; `/metrics` per service; dashboards (save success/latency, resource health); alerts (OOM, save-fail rate).
-- [ ] **Traces:** **OTel + Tempo**; auto-instrument HTTP+gRPC; propagate trace context across the gRPC hop and into the detached snapshot Job; link traces↔logs.
+- [ ] **Traces:** **OTel + Tempo**; auto-instrument HTTP+gRPC; propagate trace context across the gRPC hop and into the detached snapshot Job; link traces↔logs. Detailed step-by-step + acceptance test: `OBSERVABILITY.md` § Pillar 3 → "Detailed tracing rollout".
 - [ ] **MCP for AI:** evaluate `grafana-mcp` (or thin custom) exposing Loki/Prom/Tempo queries so an agent can pull a request's lifecycle and debug it.
+
+> Worth doing Logging + the browseterm-server/gRPC slice of Traces *before* the whole
+> save/hibernate/crash-sim flow is fully proven out — tracing pays off most on failures, not clean
+> runs, and this session's debugging would have been much shorter with it in place already.
 
 ---
 
