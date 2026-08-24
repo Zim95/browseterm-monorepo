@@ -28,3 +28,9 @@
 [submodule "browseterm_workload"]
 	path = browseterm_workload
 	url = https://github.com/Zim95/browseterm_workload.git
+[submodule "payment-gateway-spec"]
+	path = payment-gateway-spec
+	url = https://github.com/Zim95/payment-gateway-spec.git
+[submodule "payment-gateway"]
+	path = payment-gateway
+	url = https://github.com/Zim95/payment-gateway.git

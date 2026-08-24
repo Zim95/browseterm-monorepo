@@ -103,6 +103,11 @@ for i in $(seq 1 30); do
   kubectl get secret "${CONTAINER_MAKER_CERTS_SECRET_NAME}" -n "${NS}" >/dev/null 2>&1 && { echo "  cert secret ready"; break; }
   sleep 4
 done
+echo "  waiting for cert secret ${PAYMENT_GATEWAY_CERTS_SECRET_NAME} ..."
+for i in $(seq 1 30); do
+  kubectl get secret "${PAYMENT_GATEWAY_CERTS_SECRET_NAME}" -n "${NS}" >/dev/null 2>&1 && { echo "  cert secret ready"; break; }
+  sleep 4
+done
 
 step "Build in-cluster images"
 make -C browseterm-dockerfiles build_ubuntu
@@ -114,11 +119,11 @@ step "status_monitor (central pod-status watcher; replaces the per-pod status si
 make -C browseterm_workload/status_monitor prod_build
 make -C browseterm_workload/status_monitor dev_setup
 
-step "Deploy services in order: container-maker → socket-ssh → browseterm-server"
-for svc in container-maker socket-ssh browseterm-server; do
+step "Deploy services in order: container-maker → payment-gateway → socket-ssh → browseterm-server"
+for svc in container-maker payment-gateway socket-ssh browseterm-server; do
   case "$svc" in
-    container-maker) ENTRY=./infra/k8s/development/entrypoint-development.sh ;;
-    *)               ENTRY=./infra/development/entrypoint-development.sh ;;
+    container-maker|payment-gateway) ENTRY=./infra/k8s/development/entrypoint-development.sh ;;
+    *)                               ENTRY=./infra/development/entrypoint-development.sh ;;
   esac
   chmod +x "$svc/$ENTRY"
   make -C "$svc" dev_build
@@ -127,6 +132,7 @@ done
 
 step "Wait for rollouts + start the manually-started apps"
 kubectl rollout status deploy/container-maker-development -n "${NS}" --timeout=180s
+kubectl rollout status deploy/payment-gateway-development -n "${NS}" --timeout=180s
 kubectl rollout status deploy/socket-ssh-development -n "${NS}" --timeout=180s
 kubectl rollout status deploy/browseterm-server-development -n "${NS}" --timeout=180s
 # container-maker auto-starts; server + socket-ssh idle (tail -f) so launch them detached.

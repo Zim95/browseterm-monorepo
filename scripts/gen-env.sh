@@ -22,6 +22,10 @@ CM_DEV_HOST="container-maker-development-service"
 CM_DEV_PORT="50052"
 CM_HOST="container-maker-service"
 CM_PORT="50052"
+PG_DEV_HOST="payment-gateway-development-service"
+PG_DEV_PORT="50053"
+PG_HOST="payment-gateway-service"
+PG_PORT="50053"
 
 echo "Generating submodule env files from $ROOT/env.mk ..."
 
@@ -100,6 +104,14 @@ DB_USERNAME=${PG_USER}
 DB_DATABASE=${PG_DB}
 EOF
 
+# ── payment-gateway ──
+cat > payment-gateway/env.mk <<EOF
+USER_NAME=${USER_NAME}
+REPO_NAME=${REPO_NAME}
+NAMESPACE=${NAMESPACE}
+HOST_DIR=${ROOT}/payment-gateway
+EOF
+
 # ── socket-ssh ──
 cat > socket-ssh/env.mk <<EOF
 USER_NAME=${USER_NAME}
@@ -131,6 +143,11 @@ CONTAINER_MAKER_DEVELOPMENT_PORT=${CM_DEV_PORT}
 CONTAINER_MAKER_HOST=${CM_HOST}
 CONTAINER_MAKER_PORT=${CM_PORT}
 CONTAINER_MAKER_CERTS_SECRET_NAME=${CONTAINER_MAKER_CERTS_SECRET_NAME}
+PAYMENT_GATEWAY_DEVELOPMENT_HOST=${PG_DEV_HOST}
+PAYMENT_GATEWAY_DEVELOPMENT_PORT=${PG_DEV_PORT}
+PAYMENT_GATEWAY_HOST=${PG_HOST}
+PAYMENT_GATEWAY_PORT=${PG_PORT}
+PAYMENT_GATEWAY_CERTS_SECRET_NAME=${PAYMENT_GATEWAY_CERTS_SECRET_NAME}
 CERT_MANAGER_CRON_JOB_NAME=${CERT_MANAGER_CRON_JOB_NAME}
 AUTH_REDIRECT_BASE_URI=${AUTH_REDIRECT_BASE_URI}
 GOOGLE_CLIENT_ID=${SERVER_GOOGLE_CLIENT_ID}
@@ -170,5 +187,5 @@ SQL_ECHO=false
 EOF
 
 echo "Done. Generated env files for: postgres_ha, redis_ha, browseterm-dockerfiles, container-maker,"
-echo "socket-ssh, browseterm-server, browseterm-db(.env), and browseterm_workload/{cert-manager,"
+echo "payment-gateway, socket-ssh, browseterm-server, browseterm-db(.env), and browseterm_workload/{cert-manager,"
 echo "snapshot_job,status_monitor}."
