@@ -1351,6 +1351,233 @@ fresh-init and would happen again identically for anyone else running `--fresh`.
     submodule status` clean, no `+` prefixes). All committed cleanly per the
     standing no-AI-attribution convention at the top of this file.
 
+## What we did today (2026-08-25, continued — concurrency fix, error cleanup, VM restart)
+62. **Fixed the last unfixed item from the Pending list: container-maker's
+    shared Kubernetes client concurrency bug.** `ExecUtility.run_command`/
+    `run_command_with_stream`/`stream_command_to_file`
+    (`container-maker/src/resources/pod_manager.py`) now each construct a
+    dedicated `CoreV1Api()` instance for their `kubernetes.stream.stream()`
+    call instead of reusing the shared `KubernetesResourceManager.client`
+    singleton — a killed exec thread can no longer leave the shared client's
+    `request` method permanently monkey-patched to the websocket path (which
+    previously broke `NamespaceManager.get()`, on the critical path for both
+    the Save button and the reaper). Side effect: this also fixed 3
+    pre-existing failing unit tests in `test_stream_command_to_file.py` (they
+    were failing because `cls.client` is `None` outside a real cluster, which
+    a freshly-constructed `CoreV1Api()` doesn't hit). Full unit suite re-run
+    clean (45+ tests, only pre-existing unrelated `browseterm_db`-not-installed
+    import errors in this local venv, nothing new broken). Committed
+    (`2a98c19`), pushed, rebuilt, pushed to Docker Hub
+    (`sha256:2f69ed4d15c9...`), node's cached copy cleared via `crictl rmi`,
+    redeployed — **verified live**: new pod running the new digest, save
+    reconciler + gRPC server started cleanly.
+63. **Implemented the deferred item #60 (raw K8s/gRPC error text shown to
+    users).** New `clean_k8s_error_message()` (`browseterm-server/src/common/
+    utils.py`) extracts the human-readable `message` field from a Kubernetes
+    ApiException's embedded JSON body when present, substitutes a short
+    actionable message for a quota-exceeded case specifically, and otherwise
+    falls back to a clean generic message — never the raw nested-exception/
+    `HTTPHeaderDict` text. Wired into all three except-blocks in
+    `ContainerService.create_container_in_k8s`/`delete_container_in_k8s`/
+    `save_container_in_k8s` (`containers_service.py`) that used to do
+    `f"...: {str(e)}"` straight into the `HTTPException` detail shown to the
+    user — covers `resume_container` too, since resume calls
+    `create_container_in_k8s` under the hood. New unit tests
+    (`tests/unit/common/test_clean_k8s_error_message.py`, 5 tests) plus a new
+    case in `test_save_container_service.py`; full local suite otherwise
+    unchanged (same pre-existing unrelated import-error failures as always,
+    documented below). Committed (`281d269`), pushed, rebuilt, pushed to
+    Docker Hub (`sha256:f4c961f102c9...`), redeployed — **verified live** (new
+    pod running the new digest; picked up automatically via a pod restart
+    during the VM cycle in item 64, no manual `crictl rmi` needed this time).
+    **Not yet exercised against a real quota-exceeded error in the browser**
+    — the cleanup is unit-tested and deployed, but nobody has actually
+    triggered a 403-quota resume/create since it went live to see the clean
+    message render end-to-end.
+64. **Hit, and recovered from, the worst disk/memory contention episode yet
+    — while two `docker build`+`push`es (container-maker, browseterm-server)
+    ran concurrently for the redeploy above.** Host swap climbed to 90%+
+    (10.4GB/11.26GB, then macOS grew swap to 12.29GB and it kept climbing),
+    VM `/proc/loadavg` hit **37.73** (previous session's worst was ~14),
+    `kubectl` timed out on the TLS handshake, and — new this session — even
+    `multipass exec ... cat /proc/loadavg` itself timed out and a **graceful
+    `multipass restart` failed outright** (`failed to obtain exit status for
+    remote process 'sudo systemctl stop ssh': timed out after 5000 ms`) — the
+    VM was too starved to even respond to the SSH command needed to shut
+    itself down cleanly. **Confirmed host disk activity was the smoking gun,
+    not just swap accounting**: `iostat -d 1 3` showed disk0 at 294-328 MB/s
+    against a documented ~40MB/s idle baseline, live evidence of heavy paging
+    in progress, not just a stale high-water mark. Asked the user how to
+    proceed; user chose **force-stop** (`multipass stop --force
+    browseterm-k3s`, which doesn't need the guest to respond) over waiting it
+    out or manually freeing Chrome memory. **This worked cleanly**: force-stop
+    succeeded immediately, swap dropped 90%→75% just from `qemu-system-aarch64`
+    exiting, `multipass start` brought the VM back in under a minute, and once
+    up its own `/proc/loadavg` was `0.24` and host swap kept draining (75%→45%
+    over the following minutes). k3s's API server took a short extra beat to
+    accept connections after the VM was `Running` again (`ServiceUnavailable`
+    on the first few `kubectl get nodes` — expected, not a new problem; just
+    waited it out rather than treating it as a fresh incident). **New lesson
+    for the recurring-contention playbook**: if a graceful `multipass restart`
+    itself times out trying to reach the guest, that's a signal the host is
+    too starved for the normal graceful path — go straight to `multipass stop
+    --force` rather than retrying `restart`, since force-stop doesn't depend
+    on the guest responding at all. **All pods survived the force-stop/restart
+    cycle intact** (not deleted, just their containers restarted in place by
+    kubelet — confirmed via `status_monitor`'s own reconcile-on-startup log
+    line correctly reporting the user's test pod as still `Running` and NOT
+    flipping its DB row to `HIBERNATED`, since nothing was actually lost, only
+    restarted — a nice incidental live confirmation that the reconciler
+    doesn't misfire on this kind of event). This episode is added as further
+    confirmation of the swap-oversubscription root cause identified in the
+    top "Where things stand" entry above (not a new distinct cause) — the
+    trigger this time was specifically *concurrent* Docker builds, worth
+    avoiding running two heavy local builds at once on this Mac going forward.
+
+## What we did today (2026-08-25, continued — Redis ACL outage, false-FAILED bug, data loss incident)
+65. **Ran the pod-loss live test from the Pending list, using `kubectl delete
+    pod` (default grace period) on the real running test container.** This
+    surfaced two real, previously-undiscovered bugs at once, documented as
+    items 66-67 below, and — critically — **caused real, unrecoverable data
+    loss**: the pod being deleted had ~1h47m of unsaved work (last successful
+    save `10:42:03`, pod deleted `~12:29`) that was never checked before the
+    delete. The pod's filesystem was ephemeral; that window's changes are
+    gone. **Lesson for any future live pod-loss/crash test on a real
+    container (not a disposable one): always check `last_saved_at` against
+    now, and confirm with the user, before deleting/force-deleting a pod that
+    might hold unsaved work** — "test container" naming doesn't mean
+    disposable if a person is actively using it.
+66. **Bug #14 — a graceful `kubectl delete pod` on one of these pods can
+    surface a false `FAILED` status**, even though nothing actually failed
+    (this can happen on an entirely successful reaper hibernate or explicit
+    delete too, not just a manual test). Root cause: `status_monitor`'s
+    `_handle_pod` (`browseterm_workload/status_monitor/src/pod_watcher.py`)
+    wrote every observed pod phase verbatim to the DB, including terminal
+    phases. Every managed user pod defaults to `restart_policy: Always`
+    (never set explicitly in `container-maker/src/resources/pod_manager.py`),
+    so the ONLY way one can ever report a terminal phase (`Failed`/
+    `Succeeded`) is during actual pod teardown — an ordinary in-container
+    crash always gets restarted in place by kubelet instead, keeping the pod
+    `Running` throughout. A terminal phase therefore means exactly what a
+    `DELETED` event means ("this pod is going away"), just observed a moment
+    earlier in the teardown sequence — but it was racing ahead of, and
+    sometimes winning against, the deliberate hibernate/delete/
+    `mark_lost_if_running` writes that were supposed to be authoritative.
+    **Fixed**: `_handle_pod` now routes `Failed`/`Succeeded` phases through
+    the exact same guarded "only if still Running" `on_lost` callback
+    `_handle_deleted` already used, instead of writing a literal status. 3 new
+    unit tests (21/21 passing). Committed (`fbbee13`), pushed, rebuilt, pushed
+    to Docker Hub (`sha256:e46e60e7bbd8...`), redeployed — **verified live**
+    (new pod running the new digest, reconcile-on-startup clean).
+67. **Bug #15 — real production outage: Redis ACL user is never persisted,
+    so ANY Redis pod restart takes every login down cluster-wide.** Surfaced
+    live when the user tried to log in shortly after the VM force-stop/
+    restart in item 64 and got `Error creating session: invalid
+    username-password pair or user is disabled`. Root cause:
+    `browseterm-redis` is a bare `Pod` (`redis_ha/redis_single/
+    redis-single.yaml`) started with no `--requirepass`/`--aclfile`/ACL
+    config at all — the `browseterm` ACL user
+    (`REDIS_USER`/`REDIS_PASSWORD` in `env.mk`, consumed by every other
+    service as `REDIS_USERNAME`/`REDIS_PASSWORD`) was only ever created by a
+    **one-off `redis-cli ACL SETUSER` command run manually during setup**
+    (`redis_ha/scripts/development/redis_single/redis_single.setup.sh`), and
+    Redis never writes ACL state to disk unless explicitly told to. Any
+    restart (crash, node reboot, a VM cycle like item 64's) silently reverts
+    Redis to just the passwordless `default` user — confirmed directly via
+    `redis-cli ACL LIST` showing only `default` present. **Immediately
+    unblocked the user** by manually re-running the `ACL SETUSER` commands
+    against the live pod. **Fixed properly**: `redis-single.yaml` now starts
+    `redis-server` with `--aclfile /data/users.acl` (same PVC as the RDB/AOF
+    data, so it survives pod recreation), and the setup script now runs
+    `ACL SAVE` after creating the user so the file actually gets written.
+    Committed (`2dae1ba` — note: this repo's submodule checkout was in a
+    **detached HEAD**, unlike every other repo touched this session; the
+    first commit landed disconnected from any branch until caught via
+    `git status`/`git branch -a` and fast-forwarded onto `main` by hand —
+    worth checking `git status` for "HEAD detached" before committing in any
+    submodule going forward, not just assuming `git commit` always lands on
+    `main`). Pushed. **Applied live and verified the fix actually holds**:
+    deleted+recreated the `browseterm-redis` pod twice in a row (first
+    attempt correctly failed fast — Redis refuses to start with `--aclfile`
+    pointed at a file that doesn't exist yet; created an empty
+    `/data/users.acl` via a disposable `busybox` pod mounting the same PVC,
+    confirmed the existing AOF/RDB data was untouched, then recreated Redis
+    clean), created the ACL user + `ACL SAVE`, deleted+recreated the pod a
+    **second** time with zero manual steps afterward, and confirmed
+    `redis-cli ACL WHOAMI` still authenticated as `browseterm` with no
+    re-run of any setup command — the persistence genuinely holds now.
+    `browseterm-server` reconnected cleanly (no more session-creation errors
+    in its logs). **Also note**: `redis_single.setup.sh` reads
+    `REDIS_DATA_DIR` from the invoking shell's environment, but the
+    Makefile's `dev_redis_single_setup` target doesn't pass it as an argument
+    (only `NAMESPACE`/`REDIS_USER`/`REDIS_PASSWORD` are) — running `make
+    dev_redis_single_setup` without first `export`ing `REDIS_DATA_DIR`
+    yourself silently falls back to the script's own `$(pwd)/data` default,
+    which very nearly overwrote the live PV's `hostPath` with the wrong path
+    (caught safely only because a `PersistentVolume`'s `hostPath` is
+    immutable post-creation, so Kubernetes rejected the apply outright rather
+    than silently repointing it) — not fixed in code this session (low
+    urgency: the failure mode is a hard rejection, not silent corruption),
+    but worth remembering to `export REDIS_DATA_DIR=...` before ever running
+    that target directly rather than through some wrapper that sets it.
+68. **Resumed `namah_ssh_ubuntu_test` from the server side, since the user
+    couldn't get to a Resume button in the UI for a `FAILED` container**
+    (the UI's resume path is presumably only wired to show for `HIBERNATED`
+    — not confirmed in the frontend code, just observed). First corrected
+    the row `FAILED` → `HIBERNATED` via direct SQL (matching what item 66's
+    fix should have produced had it been deployed before the item 65 test),
+    then actually performed the resume itself — deliberately by re-running
+    `resume_container`'s exact logic (same `ResourceLimits`/
+    `CreateContainerK8SRequest` construction, same `ContainerService
+    .create_container_in_k8s(..., image_name_override=row['saved_image'])`
+    call, same DB write of `kubernetes_id`/`ip_address`/
+    `associated_resources`/`status=RUNNING` after) rather than reimplementing
+    pod creation by hand from raw `kubectl` — copied a one-off script into
+    the running `browseterm-server` pod and ran it with the app's own venv
+    (`/app/.venv/bin/python`) and `PYTHONPATH=/app`, so it reused the exact
+    same code path, certs, and config the real endpoint uses. **Verified**:
+    new pod `Running`, DB row `RUNNING` with the new `kubernetes_id`/
+    `ip_address`, sshd startup logs show `"User ... already exists (restored
+    container)"` confirming the snapshot's filesystem state came back.
+    Reusable pattern for any future "resume without the user's browser
+    session" need.
+69. **User then ran all three pending live tests themselves (with this
+    session driving each one), same day, right after their own save
+    succeeded — all three now confirmed live, closing out the
+    "Pod crash simulation testing" pending item above.**
+    - **In-container crash** (`kubectl exec ... -- kill -9 -1`, via `sh -c`
+      since the standalone `/usr/bin/kill` binary — not the shell builtin —
+      rejected the `-1` argument with `failed to parse argument: '(null)'`;
+      the shell builtin `kill` handles it fine): pod restart count went
+      1→2, phase stayed `Running` the entire time, DB `status` never
+      changed, and `status_monitor` logged nothing at all (no phase change
+      was ever reported by Kubernetes for kubelet's in-place restart under
+      `restart_policy: Always`, so there was nothing to dedup past). Exactly
+      the predicted self-healing behavior.
+    - **Pod loss** (graceful `kubectl delete pod` — deliberately the same
+      action that produced the false-`FAILED` result pre-fix, to prove the
+      fix specifically): checked `last_saved_at` against now first (5 min
+      gap, nothing changed since) before running it this time. Result: DB
+      `status` → `HIBERNATED` (not `FAILED`), pod fully gone from the
+      namespace, and `status_monitor`'s logs show `"terminal phase observed;
+      routed through guarded hibernate write"` for the `Failed` phase
+      Kubernetes reported during teardown — item 66's fix confirmed working
+      exactly as designed, on the very scenario that exposed the bug.
+    - **Save** — user hit Save independently on the resumed container;
+      confirmed `Succeeded` (`save_status`, `last_saved_at` current), and
+      separately confirmed the save-status widget itself behaves correctly
+      end-to-end: the button keeps its loading/spinner state while a save is
+      in progress and stops exactly when the save resolves, matching the
+      original design intent from item 50's widget work.
+    Container resumed again afterward (from the `HIBERNATED` pod-loss
+    state) to leave it in a working `RUNNING` state at session end.
+70. **Session wrap-up, user's own words**: "Looks like we are good." Only
+    the reaper/idle-hibernate scenario (of the original 3-part crash/hiber­
+    nation test plan) remains untested live — explicitly deferred to next
+    session. After that, the user's stated next focus is **payments**, not
+    further crash/hibernation work — see `PAYMENTS.md` at the monorepo root
+    for whatever standing plan already exists there (not reproduced here).
+
 ## Pending / not yet verified
 - [x] ~~Grant Terminal.app Full Disk Access~~ — **done this session**: user
       granted it, `sudo tmutil addexclusion -p "/var/root/Library/Application
@@ -1362,15 +1589,10 @@ fresh-init and would happen again identically for anyone else running `--fresh`.
       top "Where things stand" entry: the actual cause is host memory
       oversubscription/swapping, not Time Machine or Spotlight. Keep both
       changes (harmless), but don't expect them to prevent recurrence.
-- [ ] **Fix the container-maker shared-client concurrency bug** (see "Where
-      things stand" above) — `PodManager.run_command`/`run_command_with_stream`'s
-      use of `kubernetes.stream.stream()` on the shared `KubernetesResourceManager
-      .client` singleton can permanently break every other manager's plain REST
-      calls (confirmed: broke `NamespaceManager.get()`, which is on the critical
-      path for both the Save button and the reaper) if an exec-handling thread
-      gets killed mid-call. Fix: use a dedicated `CoreV1Api()` instance for the
-      `stream()` call instead of `cls.client`. Not yet fixed in code — restarting
-      `container-maker` is the workaround if it recurs.
+- [x] ~~Fix the container-maker shared-client concurrency bug~~ — **fixed,
+      deployed, and verified live 2026-08-25** (item #62 above). Each of the
+      three exec methods now uses a dedicated `CoreV1Api()` instance instead
+      of the shared `cls.client`.
 - [x] ~~container-maker's save RPC blocks a shared gRPC worker thread for the
       entire save duration~~ — **found and fixed same session** (2026-08-24,
       item #46/#47 above). `SaveUtility.save_image` no longer calls
@@ -1451,36 +1673,20 @@ fresh-init and would happen again identically for anyone else running `--fresh`.
         tick or trigger a manual `kubectl create job --from=cronjob/... ` run
         → confirm `containers.status` → `HIBERNATED` and the pod is gone
         → confirm resume-from-UI recreates it from `saved_image`.
-- [ ] **Pod crash simulation testing — two distinct scenarios now, test both**
-      (requested, not yet started; item #53/#54 above changed what the
-      second one should do):
-      1. **In-container crash** (process dies, pod object survives): use
-         `kubectl exec <pod> -n <namespace> -- kill -9 -1` (SIGKILL
-         everything in the pod), as the existing integration test does
-         (`container-maker/tests/k8s/integration/resources/
-         test_crash_hibernate_flow.py`). User pods have no explicit
-         `restart_policy` (`container-maker/src/resources/pod_manager.py`),
-         defaults to `Always` — kubelet restarts the container in place, pod
-         phase stays `Running` throughout, DB `status` never changes (this is
-         correct, not a gap — there's no separate "Crashed" status in this
-         app's model, and there doesn't need to be). Confirm: kubelet
-         auto-recovers with no explicit resume step, and check whether an
-         in-flight SSH session shows a clean disconnect/reconnect or hangs
-         silently (still an open question, never actually observed either
-         way).
-      2. **Pod loss** (the object itself disappears — node eviction,
-         resource pressure, or directly via `kubectl delete pod` <pod> -n
-         <namespace>` to simulate it manually): **this now has a real,
-         implemented recovery path as of item #54** —
-         `status_monitor` should flip `containers.status` to `HIBERNATED`
-         within moments (via `mark_lost_if_running`), and resuming from the
-         UI should recreate it from `saved_image` exactly like a normal
-         hibernate/resume. **Not yet verified live** — everything here was
-         validated with mocked unit tests only, never run against the real
-         cluster. This is the actual next test to run: delete a real
-         `Running` container's pod directly, watch `containers.status` in
-         Postgres flip to `HIBERNATED`, then resume it from the UI and
-         confirm it comes back correctly.
+- [x] ~~Pod crash simulation testing — two distinct scenarios~~ — **both
+      confirmed live 2026-08-25 (item 69 below), after item 66's fix was
+      deployed.** In-container crash (`kill -9 -1`): pod restart count
+      incremented, phase stayed `Running` throughout, DB status never
+      changed, `status_monitor` logged nothing (no phase change to react
+      to) — exactly as designed. Pod loss (graceful `kubectl delete pod`,
+      the same action that produced the false-FAILED bug pre-fix): DB status
+      correctly went to `HIBERNATED`, pod fully gone from the namespace,
+      `status_monitor` logs show the terminal `Failed` phase being caught
+      and routed through the guarded hibernate write rather than written
+      raw. Resumed successfully afterward (item 69). **Still open**: whether
+      an in-flight SSH session shows a clean disconnect/reconnect or hangs
+      silently during an in-container crash — never directly observed
+      either way, low priority.
 - [x] ~~Minor cleanup: stale `save_error` surviving a status change~~ — this
       WAS a real, live bug (not a stale data point as previously assumed):
       `ContainerOps.update()` silently dropped explicit `None` values, so
@@ -1511,43 +1717,40 @@ fresh-init and would happen again identically for anyone else running `--fresh`.
    `SETUP_TODO.md` at the monorepo root have more granular blow-by-blow detail
    from earlier sessions if needed, but this file supersedes them for current
    state.
-2. **First check: did the user finish granting Terminal.app Full Disk Access
-   and did the `tmutil addexclusion` command get run?** (See the top "Where
-   things stand" entry and the first "Pending" item.) If not done yet, that's
-   the immediate next step — do it before resuming testing, since a third
-   contention episode this session ran 15+ min and trended worse rather than
-   self-resolving, and this fix directly addresses that root cause.
-3. **Check whether the VM's disk I/O contention has settled**:
-   `kubectl get nodes --request-timeout=20s`. If it still times out, don't
-   assume a cluster problem — check the Mac's own disk activity first
-   (`iostat -d 1 3`, `ps aux | grep -iE "backupd|mdworker"`) before touching
-   anything in the cluster.
-4. **Resume the in-flight hibernation test** (reaper is now deployed — see
-   "Where things stand" and the updated "Pending" item): check
-   `kubectl get pods -n browseterm | grep reaper-manual-test-1` and its logs
-   first before creating a new manual job — it may have completed once
-   contention cleared. Confirm `containers.status` for id
-   `473f769c-4e5f-48ca-9a33-b572434bab63` flipped to `HIBERNATED` and its pod
-   is gone, then test the resume-from-UI flow to recreate it from
-   `saved_image`.
-5. Then move to **pod-crash-simulation testing** (test plan already written up
-   under "Pending" above) — also **watch for a real save going into
-   `Pending`/`Running`** during either test and let the save reconciler
-   demonstrate itself naturally if one gets stuck, or deliberately force it
-   per the "Pending" item above if the opportunity doesn't come up organically
-   — this session's core fix hasn't been observed recovering a real stuck
-   save yet.
-6. Every time you fix something, verify it against the real running app
+2. **Check host swap/memory pressure before touching the cluster**
+   (`sysctl vm.swapusage`, `top -l 1 -o mem`) — this is the confirmed root
+   cause of every "disk contention" episode across this project's history
+   (see top "Where things stand" entry), and it recurred as recently as
+   2026-08-25 (item 64) specifically from running two concurrent local
+   `docker build`s. **Never run two heavy local builds at once on this Mac.**
+   If `multipass exec`/`kubectl` are timing out and a graceful `multipass
+   restart` itself times out trying to reach the guest, go straight to
+   `multipass stop --force browseterm-k3s` then `multipass start` rather than
+   retrying restart — this is proven to work (item 64) and doesn't depend on
+   the guest responding at all.
+3. **User's explicit next-session priority, in their own words**: test the
+   **reaper/idle-hibernate scenario** first (the one remaining untested leg
+   of the original 3-part crash/hibernation test plan — in-container crash
+   and pod loss are both now confirmed live, see item 69). Test plan:
+   `UPDATE containers SET last_active_at = now() - interval '8 days' WHERE
+   id=...` on a real running container (check `last_saved_at` against now
+   and confirm with the user first — a past session's pod-loss test caused
+   real unsaved-work data loss by skipping this check, item 65), then either
+   wait for the hourly reaper CronJob or force it
+   (`kubectl create job reaper-test-N --from=cronjob/reaper -n browseterm`).
+   Confirm `containers.status` → `HIBERNATED` and the pod is gone, then
+   resume from the UI (or replicate `resume_container`'s logic server-side
+   per item 68's pattern if the user can't reach the UI's resume button).
+4. **After the reaper test passes, the user's stated next focus is
+   payments, not further crash/hibernation work** — see `PAYMENTS.md` at
+   the monorepo root for whatever standing plan already exists there (not
+   reproduced here; read it fresh rather than assuming this file's summary
+   of it is current).
+5. Every time you fix something, verify it against the real running app
    (browser or an actual API call, or a direct `psql`/`kubectl exec` check),
    not just "the config looks right" — this has been true of literally every
    bug found across this whole multi-day session.
-7. When hibernation and crash-sim testing are both done, and the remaining
-   minor cleanup items are resolved (or explicitly deferred), write the
-   mission's final completion report (local app URL, socket URL, K3s context,
-   VM IP, ingress external IP, `/etc/hosts` mapping, terminal E2E result, save
-   E2E result, hibernation result, crash-sim result, remaining blockers) —
-   hasn't been written yet, there's always been one more thing in flight.
-8. Keep updating this file as you go, same style: don't diary-append forever —
+6. Keep updating this file as you go, same style: don't diary-append forever —
    periodically fold older "What we did today" entries' *conclusions* into
    "Where things stand" and trim detail that's no longer actionable, so a cold
    read stays fast even as the file grows across many sessions.
