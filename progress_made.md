@@ -28,6 +28,68 @@ likely just that cache lag, not a sign the rewrite didn't take — re-check
 `git log --grep="anthropic.com" -i` on that repo's `main` before assuming
 otherwise.
 
+## Where things stand (as of 2026-08-27 — reaper/save race fixed and deployed; idle-hibernate test finally closed out)
+**Found and fixed a real bug in the reaper's hibernate flow: it could delete a pod before
+confirming the pod's own save had actually succeeded.** Root cause: an earlier session's fix to
+stop `SaveUtility.save_image` from blocking one of container-maker's fixed 10 gRPC worker threads
+for a save's full duration (see the 2026-08-24 entry below, item #47) made the `saveContainer`
+RPC return as soon as container-maker **creates** the snapshot Job, not once it **finishes**. The
+reaper's own hibernate flow (`browseterm_workload/reaper/src/reaper.py`) was never updated for
+that change — its own inline comment still claimed the RPC "blocks until the snapshot Job
+finishes" — so it proceeded straight to `deleteContainer` almost immediately after triggering a
+save, regardless of whether the build+push later succeeded or failed. Caught live: manually
+triggered the reaper against a container with `last_active_at` backdated past the idle threshold;
+the snapshot Job's `docker build` failed 3/3 attempts (`Cannot connect to the Docker daemon`), yet
+the reaper still deleted the pod and marked the row `HIBERNATED`, reporting the whole run as a
+clean success (`hibernated: 1, failed: 0`). No data was actually lost this particular time (the
+container's `last_saved_at` was only 87s before it went idle, and the failed rebuild died at the
+build step, before it could overwrite the still-valid, previously-pushed image tag) — but the
+mechanism was a real, general data-loss risk on any hibernate with genuinely unsaved changes, not
+just a contention-triggered edge case.
+
+**Fixed** (`browseterm_workload/reaper/src/reaper.py` + `src/db_ops.py` + `src/config.py`): the
+reaper now polls the container's `save_status` (new `wait_for_save_terminal` helper) until it
+reaches a terminal state before ever calling `deleteContainer`. Only a confirmed `Succeeded`
+proceeds to delete; a `Failed` status, or an unresolved timeout (`REAPER_SAVE_WAIT_TIMEOUT_SECONDS`,
+default 4500s — comfortably above container-maker's own 4200s outer save ceiling), leaves the pod
+running and the row `RUNNING` untouched, to be retried on the reaper's next sweep — same
+"no-automatic-retries, the next real tick is the retry" convention already used elsewhere in this
+project. 5 new unit tests (15/15 passing). Committed (`browseterm_workload` `ebd1332`, monorepo
+pointer `ce8a38a`), rebuilt, pushed to Docker Hub (`zim95/reaper:latest`,
+`sha256:e4e87e6eda28...`) — **no manual redeploy/`crictl rmi` step was needed**, since the
+reaper's CronJob Job template already uses `imagePullPolicy: Always`, so the very next Job it
+spawns (scheduled or manual) picks up the new image automatically. **User re-ran the idle-hibernate
+test against the fixed image and confirmed it now works correctly** — this closes out the third
+and final leg of the original crash/hibernation test plan (in-container crash and pod loss were
+already confirmed live in the prior session; idle/reaper-triggered hibernate is now confirmed too).
+
+**Two related gaps were found along the way and deliberately left unfixed, per the user's explicit
+"stop chasing edge cases, we'll figure things out once it's in production" direction (2026-08-27) —
+revisit only if either actually resurfaces live, and capture evidence (`kubectl describe`,
+`dockerd.log`) before anything gets garbage-collected next time:**
+- **`resume_container` (`browseterm-server/src/api_handlers.py`) has no server-side check that a
+  container's `status` is actually `HIBERNATED` before creating a brand-new pod for it** — it just
+  reads the row, runs the subscription/quota checks, and unconditionally calls
+  `create_container_in_k8s`, then overwrites `kubernetes_id`/`ip_address`/`status` to point at the
+  new pod. Today the only thing preventing this from being called against an already-`RUNNING`
+  container (which would silently orphan the original pod — same *class* of bug as the reaper's
+  earlier wrong-id delete bug, just entering through a different door) is the frontend choosing not
+  to show a Resume button outside `HIBERNATED` — never confirmed as an airtight guarantee. Not
+  fixed this session; the reaper fix above already makes the specific "save failed → still shows
+  as resumable" path unreachable (a failed save now leaves `status=RUNNING`, so no Resume button
+  would even appear), so this is a defense-in-depth gap, not a currently-live path to a real bug.
+- **`snapshot_job`'s `docker` daemon startup has no readiness check at all**
+  (`browseterm_workload/snapshot_job/infra/deployment/entrypoint.sh`: backgrounds `dockerd`, sleeps
+  a flat 5 seconds, then proceeds regardless of whether the daemon's socket actually exists). This
+  is a real bug on its own merits. Whether it's *the* root cause of the one observed build failure
+  above is genuinely unconfirmed — that failure happened 110 seconds after the pod started, well
+  past the 5-second window, which means `dockerd` most likely failed to start at all (crashed, or
+  got stuck) rather than merely being slow; distinguishing "host disk-I/O contention broke dockerd's
+  own storage-driver init" from "the Job's 1 CPU/1Gi resource limit OOM-killed the daemon" from
+  something else entirely would need `kubectl describe`/`dockerd.log` captured from that exact pod,
+  which had already been garbage-collected (1h TTL) by the time this was investigated. Not fixed
+  this session.
+
 ## Where things stand (as of 2026-08-24 early afternoon — root cause of "disk I/O contention" finally found)
 **The recurring "host disk I/O contention" documented all across this multi-day
 session was misdiagnosed.** It is NOT Time Machine or Spotlight (both were
@@ -1578,6 +1640,54 @@ fresh-init and would happen again identically for anyone else running `--fresh`.
     further crash/hibernation work — see `PAYMENTS.md` at the monorepo root
     for whatever standing plan already exists there (not reproduced here).
 
+## What we did today (2026-08-26 → 2026-08-27 — reaper idle-hibernate test closed out)
+71. **Also produced this session (separate request, not part of the reaper work): a from-scratch
+    engineering-accomplishments writeup for the user's resume/LinkedIn**, built by directly
+    inspecting the actual implementation across every repo (not from this file's narrative alone)
+    via 6 parallel research passes, one per major subsystem. Written to
+    `/Users/reetunamah/browseterm/resume_result.md` (outside this monorepo, at the parent
+    `~/browseterm` level) — not reproduced here, read it directly if it needs updating later.
+72. **Simulated idleness on the one real running terminal again**
+    (`namah_ssh_ubuntu_test`, id `473f769c-4e5f-48ca-9a33-b572434bab63`) via
+    `UPDATE containers SET last_active_at = now() - interval '8 days'`, matching the
+    already-documented, already-safe test pattern. Checked `save_status`/`last_saved_at` against
+    now first, per the standing lesson from the item-65 data-loss incident — clean, nothing at
+    risk.
+73. **The reaper's own hourly schedule had silently missed 3 consecutive ticks** (19:00/20:00/21:00)
+    by the time this was checked — `LAST SCHEDULE` on the CronJob was 3h+ stale, `Active Jobs: <none>`.
+    Cluster events from the same window showed token-refresh timeouts, an unreachable metrics API,
+    and HPA `Unauthorized` errors — the same host memory-oversubscription/swap-thrashing signature
+    documented earlier in this file, almost certainly also stalling the CronJob controller's own
+    scheduling loop, not a bug in the reaper or its manifest. Missed CronJob ticks are not backfilled
+    by Kubernetes by default. Triggered a manual run instead of waiting for a fourth possible miss
+    (`kubectl create job reaper-manual-hibernate-test --from=cronjob/reaper`).
+74. **That manual run is what surfaced the real bug documented in the new top "Where things stand"
+    entry above**: the snapshot Job's `docker build` failed 3/3 attempts under live host contention
+    (disk0 300-450MB/s against a ~40-53MB/s idle baseline, confirmed via `iostat`; swap 90%+ full),
+    yet the reaper still deleted the pod and marked the container `HIBERNATED`, logging the run as a
+    clean success. Traced end-to-end via `kubectl logs`/`psql` across the reaper, container-maker,
+    and the snapshot Job's own pod (its logs were still available at the time — later garbage
+    collected before a deeper follow-up investigation, a lesson for next time: pull `kubectl describe`
+    and full logs from a failing Job's pod immediately, before its TTL expires).
+75. **Fixed, tested, deployed** — see the top "Where things stand" entry for the exact design
+    (poll `save_status` to a terminal state before ever deleting; leave the pod running on anything
+    but a confirmed `Succeeded`). Rebuilt+pushed the image; confirmed no extra redeploy step was
+    needed since the reaper's Job template already pulls `imagePullPolicy: Always`.
+76. **User re-ran the idle-hibernate test against the fixed image and confirmed hibernate now works
+    correctly** — closing out the last untested leg of the original 3-part crash/hibernation plan.
+77. **Discussed, but explicitly deferred (not fixed), two adjacent gaps** found while reasoning
+    through the fix's edge cases with the user — see the top "Where things stand" entry for both:
+    `resume_container`'s missing server-side `HIBERNATED`-status guard, and `snapshot_job`'s
+    entrypoint having no real `dockerd` readiness check (only a root cause left genuinely
+    unconfirmed, not just deprioritized). **User's explicit direction**: stop chasing edge cases for
+    now — "we'll figure things out once it's out in production." Both are logged under Pending
+    below rather than pursued further this session.
+78. **Session wrap-up**: this file updated, all pending work across every repo committed and pushed,
+    monorepo submodule pointers synced (`git submodule status` clean, no `+`/`-` prefixes) — per
+    explicit user request before moving on. Next focus, per the user, is getting the platform ready
+    for production rather than continuing to hunt for more edge cases; revisit the two deferred
+    items above only if they actually resurface live.
+
 ## Pending / not yet verified
 - [x] ~~Grant Terminal.app Full Disk Access~~ — **done this session**: user
       granted it, `sudo tmutil addexclusion -p "/var/root/Library/Application
@@ -1623,19 +1733,14 @@ fresh-init and would happen again identically for anyone else running `--fresh`.
       (`kubectl delete pod <snapshot-job-pod> -n browseterm --force`) to
       force the exact orphaned-Running scenario, then confirm the row flips
       to `Failed` within ~90s without any manual DB intervention.
-- [ ] **Hibernation/reaper testing** — **reaper is now deployed** (2026-08-24
-      late morning; `browseterm_workload/reaper/env.mk` created by hand, `make
-      dev_setup` applied ServiceAccount/Role/RoleBinding/CronJob cleanly, image
-      already existed on Docker Hub). Test is **in-flight but blocked**: idleness
-      simulated via SQL on `namah_ssh_ubuntu_test`
-      (id `473f769c-4e5f-48ca-9a33-b572434bab63`), manual run triggered
-      (`kubectl create job reaper-manual-test-1 --from=cronjob/reaper -n
-      browseterm`), but that job's pod has been stuck `ContainerCreating` due to
-      the disk I/O contention documented above — **not yet confirmed whether the
-      reaper actually hibernated the container**. Pick this up by checking
-      `kubectl get pods -n browseterm | grep reaper-manual-test-1` and its logs
-      first once contention clears; only create a fresh manual job if that one
-      genuinely failed rather than just being stuck on image pull. Original
+- [x] ~~Hibernation/reaper testing~~ — **fully confirmed 2026-08-26/27, closing out
+      the last untested leg of the original 3-part crash/hibernation plan** (the
+      other two, in-container crash and pod loss, were already confirmed 2026-08-25).
+      Along the way, found and fixed a real bug: the reaper could delete a pod
+      before its own triggered save had actually finished/succeeded (see the top
+      "Where things stand" entry for the full story and the fix) — the idle-hibernate
+      test is what surfaced this live. After the fix was deployed, the user re-ran
+      the test and confirmed hibernate now works correctly end-to-end. Original
       investigation findings (from an earlier subagent, still accurate):
       - Reaper source: `browseterm_workload/reaper/` — `src/reaper.py`'s
         `Reaper.run()` queries idle containers, then per-container: gRPC
@@ -1673,6 +1778,27 @@ fresh-init and would happen again identically for anyone else running `--fresh`.
         tick or trigger a manual `kubectl create job --from=cronjob/... ` run
         → confirm `containers.status` → `HIBERNATED` and the pod is gone
         → confirm resume-from-UI recreates it from `saved_image`.
+- [ ] **`resume_container` has no server-side check that a container is actually
+      `HIBERNATED` before creating a new pod for it** (`browseterm-server/src/
+      api_handlers.py`) — found 2026-08-27 while reasoning through the reaper fix's
+      edge cases, not fixed. Today the only thing preventing a double-pod/orphan
+      scenario is the frontend not showing a Resume button outside `HIBERNATED` —
+      never confirmed as airtight. **Explicitly deferred per user direction**
+      ("stop chasing edge cases, we'll figure things out once it's in production")
+      — revisit only if it actually surfaces live; the fix would be a simple guard
+      at the top of `resume_container` rejecting with a clear error unless
+      `row['status'] == HIBERNATED`.
+- [ ] **`snapshot_job`'s entrypoint has no `dockerd` readiness check**
+      (`browseterm_workload/snapshot_job/infra/deployment/entrypoint.sh` backgrounds
+      `dockerd`, sleeps a flat 5 seconds, then proceeds regardless) — found 2026-08-27
+      while investigating why a snapshot build failed during the reaper test above,
+      not fixed. Real bug on its own merits, but whether it's *the* root cause of
+      that specific failure is genuinely unconfirmed — the failure happened 110s
+      after pod start (well past the 5s window), and the pod was garbage-collected
+      before `kubectl describe`/`dockerd.log` could be pulled. **Explicitly deferred**,
+      same reasoning as above. If it recurs: capture the failing pod's full state
+      *before* its TTL expires, then fix the entrypoint to poll for the docker socket
+      with a real timeout instead of a fixed sleep.
 - [x] ~~Pod crash simulation testing — two distinct scenarios~~ — **both
       confirmed live 2026-08-25 (item 69 below), after item 66's fix was
       deployed.** In-container crash (`kill -9 -1`): pod restart count
@@ -1728,24 +1854,20 @@ fresh-init and would happen again identically for anyone else running `--fresh`.
    `multipass stop --force browseterm-k3s` then `multipass start` rather than
    retrying restart — this is proven to work (item 64) and doesn't depend on
    the guest responding at all.
-3. **User's explicit next-session priority, in their own words**: test the
-   **reaper/idle-hibernate scenario** first (the one remaining untested leg
-   of the original 3-part crash/hibernation test plan — in-container crash
-   and pod loss are both now confirmed live, see item 69). Test plan:
-   `UPDATE containers SET last_active_at = now() - interval '8 days' WHERE
-   id=...` on a real running container (check `last_saved_at` against now
-   and confirm with the user first — a past session's pod-loss test caused
-   real unsaved-work data loss by skipping this check, item 65), then either
-   wait for the hourly reaper CronJob or force it
-   (`kubectl create job reaper-test-N --from=cronjob/reaper -n browseterm`).
-   Confirm `containers.status` → `HIBERNATED` and the pod is gone, then
-   resume from the UI (or replicate `resume_container`'s logic server-side
-   per item 68's pattern if the user can't reach the UI's resume button).
-4. **After the reaper test passes, the user's stated next focus is
-   payments, not further crash/hibernation work** — see `PAYMENTS.md` at
-   the monorepo root for whatever standing plan already exists there (not
-   reproduced here; read it fresh rather than assuming this file's summary
-   of it is current).
+3. **The full 3-part crash/hibernation test plan is now closed out** (in-container
+   crash, pod loss, and idle/reaper-triggered hibernate — see item 69 and the
+   2026-08-26/27 entries above). **User's explicit direction as of 2026-08-27:
+   stop hunting for more edge cases in this area — "we'll figure things out once
+   it's out in production."** Two known-but-unfixed gaps are logged under
+   Pending (`resume_container`'s missing `HIBERNATED` guard,
+   `snapshot_job`'s missing `dockerd` readiness check) — do not proactively chase
+   either; only revisit if one actually surfaces live, and if so capture full
+   evidence (`kubectl describe`, logs) from the failing pod *before* its TTL
+   expires, unlike this session's dockerd investigation.
+4. **The user's stated next focus is production-readiness/payments, not further
+   crash/hibernation work** — see `PAYMENTS.md` at the monorepo root for whatever
+   standing plan already exists there (not reproduced here; read it fresh rather
+   than assuming this file's summary of it is current).
 5. Every time you fix something, verify it against the real running app
    (browser or an actual API call, or a direct `psql`/`kubectl exec` check),
    not just "the config looks right" — this has been true of literally every
