@@ -34,3 +34,6 @@
 [submodule "payment-gateway"]
 	path = payment-gateway
 	url = https://github.com/Zim95/payment-gateway.git
+[submodule "browseterm-server-local"]
+	path = browseterm-server-local
+	url = https://github.com/Zim95/browseterm-server-local.git

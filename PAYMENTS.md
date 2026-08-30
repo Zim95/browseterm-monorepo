@@ -6,6 +6,166 @@
 > See `payment-gateway/README.md` for the one deliberate deviation from the ContainerMaker
 > pattern (proto file naming, to avoid a protobuf descriptor-pool collision).
 
+---
+
+# Current Architecture (as-built, 2026-08-29)
+
+This section describes what is actually running today, verified directly against the code and
+the live cluster rather than restated from the original task spec below (which is kept as
+historical context — see "Task: Add Payment gRPC Service v0 to Browseterm" onward). Where this
+section and the spec disagree, this section is the truth.
+
+## End-to-end flow
+
+```text
+Browser (/subscriptions "Select Plan")
+    │  redirect
+    ▼
+Browser (/payment?plan_id=...)
+    │  browseterm-server renders Plan/Price/Currency/GST/Total (client-computed, display-only)
+    │  payment.js mints one idempotency key per checkout attempt (crypto.randomUUID()),
+    │  reused across every Pay click/retry on this page, never rendered in the DOM
+    │
+    │  POST /create-payment  { plan_id, idempotency_key }
+    │  existing session cookie — no card data, no amount, ever sent from the browser
+    ▼
+browseterm-server (FastAPI, src/api_handlers.py::create_payment)
+    │  @authenticate_session — user_id comes from the server-side Redis session, never the body
+    │  amount_minor/currency are still HARDCODED here (49900 / "INR") — no real plans/pricing
+    │  table exists yet, so nothing browser-supplied is trusted for the actual charge
+    ▼
+PaymentService (src/payments/payments_service.py)
+    │  reads client.key/client.crt/ca.crt live from the PAYMENT_GATEWAY_CERTS_SECRET_NAME
+    │  k8s Secret on every instantiation (same pattern as ContainerService)
+    │  builds a GRPCUtils channel/stub, calls makePayment with a 5s deadline
+    │  x-request-id gRPC metadata carries the same request_id as browseterm-server's own
+    │  structured logs (contextvar-based), so a request is traceable across both services
+    ▼
+gRPC over TLS  →  payment-gateway:50053 (ClusterIP Service, internal only, no Ingress)
+    ▼
+payment-gateway (Click-driven app.py + grpc.server, ThreadPoolExecutor,
+                 RequestIdInterceptor — mirrors container-maker's server shape exactly)
+    │  PaymentGatewayAPIServicerImpl.makePayment (src/grpc/servicer.py):
+    │    - logs the full request (user_id, plan_id, amount_minor, currency, idempotency_key)
+    │    - returns a HARDCODED response: payment_id="pay_test_001", status=SUCCESS
+    │    - no persistence, no Stripe, no real charge — this only proves the path end to end
+    ▼
+Response bubbles back up unchanged; browseterm-server translates gRPC errors
+(UNAVAILABLE/DEADLINE_EXCEEDED → HTTP 503, anything else → HTTP 500) so a payment-gateway
+outage returns a controlled error instead of hanging the request.
+    ▼
+Browser: NotificationManager toast — "Payment successful, Payment ID: pay_test_001"
+```
+
+## Proto contract (`payment-gateway-spec`)
+
+```proto
+service PaymentGatewayAPI {
+  rpc makePayment(PaymentRequest) returns (PaymentResponse);
+}
+
+message PaymentRequest {
+  string user_id = 1;           // resolved server-side by browseterm-server, never from the browser
+  string plan_id = 2;
+  int64 amount_minor = 3;       // integer minor currency unit (e.g. 49900 = ₹499.00) — already
+                                 // minor-unit end to end at this layer; only browseterm-db's own
+                                 // subscription_types.amount (DECIMAL rupees) still needs migrating
+  string currency = 4;          // ISO 4217, e.g. "INR"
+  string request_id = 5;        // cross-service log correlation id (NOT the idempotency key)
+  string idempotency_key = 6;   // client-generated, one per checkout attempt, logged only (see below)
+}
+
+message PaymentResponse {
+  string payment_id = 1;
+  PaymentStatus status = 2;     // PAYMENT_STATUS_UNSPECIFIED | _SUCCESS | _FAILED
+  string message = 3;
+}
+```
+
+`request_id` and `idempotency_key` are deliberately separate fields with different lifetimes:
+`request_id` is a per-hop tracing id (new on every HTTP request, even a retry); `idempotency_key`
+is stable across every retry of the *same* checkout attempt. Conflating them was considered and
+rejected early in this work.
+
+## TLS — real state, not just the intended design
+
+Both `browseterm-server` and `payment-gateway` mount the **same shared Secret**
+(`payment-gateway-service-certs` in prod, `payment-gateway-development-service-certs` in dev —
+5 keys: `server.key`, `server.crt`, `client.key`, `client.crt`, `ca.crt`), minted/rotated by a
+shared `cert-manager` CronJob in the `browseterm` namespace (the same one used for
+`container-maker`'s certs — not the cert-manager *operator*'s `Certificate` CRD, a homegrown
+rotation job).
+
+**However**: `payment-gateway/app.py::serve()` calls `grpc.ssl_server_credentials(...)` with
+`root_certificates` set but **without `require_client_auth=True`**. That means the server
+currently does **not** actually verify the client certificate `browseterm-server` presents — this
+is server-authenticated TLS today, not enforced mutual TLS, even though every piece of cert
+material for real mTLS already exists and is mounted (`CLIENT_KEY`/`CLIENT_CRT` env vars are set
+in the Deployment manifest but never read anywhere in `payment-gateway`'s own code). Flipping this
+to real mTLS is a one-line change (`require_client_auth=True`) plus reading/wiring the client cert
+env vars — not done yet, noted here so it isn't assumed to already be enforced.
+
+## Kubernetes
+
+- `payment-gateway` Deployment: 1 replica, `zim95/payment-gateway:latest`, `imagePullPolicy:
+  IfNotPresent` in prod manifest, container port `50053`, requests `100m`/`256Mi`, limits
+  `500m`/`512Mi`.
+- `payment-gateway-service`: `ClusterIP`, port `50053` → `50053`. Not exposed via Ingress —
+  internal-only, matching the spec's explicit "do not expose publicly, Stripe webhooks come
+  later" instruction.
+- `browseterm-server` reaches it via `PAYMENT_GATEWAY_HOST`/`PAYMENT_GATEWAY_PORT` env vars
+  (default `payment-gateway-development-service`/`50053` in dev).
+
+## Idempotency key — what's real vs. what's still just logging
+
+- Generated client-side (`payment.js`, `crypto.randomUUID()` with a manual fallback), once per
+  page load, reused for every Pay click/retry on that page, never rendered in the UI.
+- Flows browser → `CreatePaymentRequest.idempotency_key` → `PaymentService.make_payment` →
+  `PaymentRequest.idempotency_key` (proto) → `payment-gateway`'s `makePayment` logs it via
+  structured JSON logging.
+- **Not yet enforced or deduplicated** — there is no persistence layer to check "have I seen this
+  key before" against, so two calls with the same key today would both return
+  `pay_test_001`/`SUCCESS` independently. The only verification path that exists right now is
+  visual: grep/query `payment-gateway`'s logs (Loki/Grafana once wired) for repeated
+  `idempotency_key` values across retries of the same checkout attempt, per `plan.md`'s explicit
+  ask. Real deduplication needs a payments table keyed on `idempotency_key` — listed under "not yet
+  implemented" below.
+
+## What's still genuinely not implemented (v0, unchanged from the original spec's "do not implement yet" list except where noted)
+
+```text
+Stripe / PaymentIntent / Checkout / webhooks     — not started; user has chosen Stripe Checkout
+                                                    (hosted redirect) as the approach, blocked on
+                                                    the user providing test-mode API keys
+payment persistence / payments database          — none; makePayment is stateless
+real plan-based pricing                          — amount_minor/currency still hardcoded in
+                                                    browseterm-server's /create-payment regardless
+                                                    of plan_id
+idempotency enforcement/deduplication            — logged only, not checked/rejected (see above)
+subscriptions/entitlements tie-in to payment      — subscription plan gating exists for resume
+                                                    (see browseterm-server's resume_container),
+                                                    but purchasing a plan doesn't yet actually
+                                                    change the user's subscription row
+refunds, retries, reconciliation, DLQ            — not started
+double-entry ledger                              — design recommended (2026-08-29,
+                                                    progress_made.md), not implemented; depends on
+                                                    the Stripe webhook landing first as the trigger
+mTLS enforcement                                 — cert material exists, not actually required by
+                                                    the server yet (see TLS section above)
+metrics/tracing beyond structured logs+request_id — not started
+```
+
+## Testing that exists today
+
+- `payment-gateway`: unit tests for `PaymentGatewayAPIServicerImpl` (mocked context), including a
+  test asserting `idempotency_key` is logged.
+- `browseterm-server`: unit tests for `PaymentService` (mocked gRPC stub) covering the
+  success/UNAVAILABLE/other-RPC-error paths; an integration test for the `create_payment` HTTP
+  handler; an e2e test confirming an unauthenticated `POST /create-payment` is redirected to
+  `/login` and never reaches `PaymentService` at all.
+
+---
+
 # Task: Add Payment gRPC Service v0 to Browseterm
 
 We are adding a new internal microservice called **payment-service** to Browseterm.

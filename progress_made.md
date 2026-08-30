@@ -28,6 +28,181 @@ likely just that cache lag, not a sign the rewrite didn't take — re-check
 `git log --grep="anthropic.com" -i` on that repo's `main` before assuming
 otherwise.
 
+## Where things stand (as of 2026-08-30 — hibernate/resume/reaper status confirmed via code; payment-gateway architecture documented; capacity-measurement methodology written up in cost.md)
+**Answered a round of user questions about hibernate/resume/reaper by re-reading the actual code**
+(not from memory of this file's own summary — this file's account, and the underlying repos, had
+both moved since the questions were last answered):
+- **Resume quota check: implemented.** `browseterm-server/src/api_handlers.py:449`'s
+  `resume_container` gates every resume against the user's current subscription plan two ways —
+  active-container count vs. `max_containers`, and whether the container's own stored resource
+  spec still fits the current plan tier (covers a downgrade since last saved). Both fail open on a
+  subscription-lookup error (never block recovery over a billing hiccup). **Still open,
+  deliberately deferred** (documented previously, re-confirmed unchanged): no guard that the row's
+  `status` is actually `HIBERNATED` before recreating a pod.
+- **Hibernate does delete the pod — confirmed twice over**, both from code and from a live git
+  history dig: the reaper's flow is save → wait for a confirmed terminal `save_status` → delete the
+  pod (Service and Ingress too, see the 2026-08-29 PAYMENTS.md-writing entry's Kubernetes-object
+  findings, though that entry is about payment-gateway not the reaper) → mark `HIBERNATED`.
+- **"Did we fix the issue with reaper not deleting pods?" — yes, real bug, found and fixed, did
+  not resolve itself.** This session's local `browseterm_workload` checkout was itself 5 commits
+  behind `origin/main` (the same stale-checkout pattern documented 2026-08-29 — fetched and
+  fast-forwarded before answering, per the standing lesson). The fix, `86032fd` (2026-08-25):
+  `_hibernate_one` was passing the container's **database row ID** to `deleteContainer`, but
+  container-maker's pod lookup (`check_pod`) matches on the pod's actual **Kubernetes UID**, not
+  the DB ID — so the match never happened, `delete_pod` was silently never called, and the API
+  still reported `{'status': 'Deleted'}` regardless. **Every hibernate that had ever run left the
+  pod alive and orphaned** while the DB row happily flipped to `HIBERNATED`. Surfaced live when a
+  hibernated-then-resumed container ended up with both the old and new pod running simultaneously
+  (double quota usage, SSH randomly routing to either one). Fixed by passing
+  `row['kubernetes_id']` instead; 5 passing unit tests including a regression test for this exact
+  scenario. A separate, later fix (`ebd1332`, also already merged) additionally made the reaper
+  wait for a **confirmed** `save_status=Succeeded` before ever deleting, closing the earlier
+  (2026-08-27) data-loss risk documented below. Both fixes are live in the deployed reaper image;
+  the CronJob is currently running cleanly on its hourly schedule.
+
+**Documented payment-gateway's actual current architecture** into
+`browseterm-monorepo/PAYMENTS.md`'s new "Current Architecture (as-built, 2026-08-29)" section
+(written the same day as the previous entry above, but recorded here since it wasn't yet folded
+into this file's own summary) — full request-flow diagram, the exact proto contract including the
+now-added `idempotency_key` field, and one real finding worth repeating here: **TLS between
+browseterm-server and payment-gateway is server-authenticated only, not enforced mutual TLS**,
+despite both sides having full client-cert material mounted — `payment-gateway/app.py::serve()`
+calls `grpc.ssl_server_credentials(...)` without `require_client_auth=True`, and the `CLIENT_KEY`/
+`CLIENT_CRT` env vars set in its Deployment manifest are never read anywhere in its own code.
+Flipping this to real mTLS is a small, well-understood follow-up, not done yet.
+
+**Wrote a full capacity-measurement methodology into `~/browseterm/cost.md`'s new "Claude
+Response" section**, in response to the user's cost.md brief (design-the-experiment only, no
+pricing, no code changes, no fabricated numbers) — motivated by the user's stated plan to
+**probably disable payments and run free-tier-only**, needing to know the minimum resources that
+requires. Two parallel read-only investigations fed this: one against the live k3s cluster
+(`kubectl get/describe/top`, no state changed), one tracing `container-maker`/`socket-ssh`/
+`browseterm_workload`/`browseterm-server` source to answer the "does one browser tab = one pod"
+question definitively (**no** — confirmed multiple terminal tabs are multiple SSH sessions into
+one existing pod, not multiple pods) and to trace hibernation's exact Kubernetes-object lifecycle
+(Pod+Service+Ingress all deleted; only an external Docker-registry image persists — this is
+**outside k8s's own resource accounting entirely**, meaning the real cost lever at this scale is
+how aggressively idle workspaces get hibernated, not the per-workspace resource limit itself).
+
+**The single most load-bearing finding from that investigation**: doing the arithmetic on
+already-configured values (not a live load test) shows the **platform's own fixed pods already
+consume 3.5 of this node's 4 CPU-limit-cores** before any user workspace exists at all — adding
+just **one** Free-plan workspace (1 CPU limit) pushes total CPU limits to 4.5/4 = **112%**, which
+matches the live `kubectl describe node` "Allocated resources: CPU limits 112%" reading exactly
+(there was exactly one workspace pod running at inspection time — the calculation and the live
+number cross-validate each other). At the full beta ceiling (5 concurrent Free-plan workspaces),
+CPU/memory **requests** (what the scheduler actually checks) still fit comfortably, but memory
+**limits** would exceed the node's ~7.73GiB allocatable — CPU-limit oversubscription risks
+throttling (compressible, degraded but not fatal), memory-limit oversubscription risks an actual
+OOM kill (non-compressible, potentially fatal to an unrelated process on the node). Neither has
+actually been observed under real load yet — both are flagged as UNKNOWN requiring a specific
+follow-up experiment (read `/sys/fs/cgroup/cpu.stat` during a real CPU-bound task in a workspace;
+run a genuine 5-concurrent-user load test), not treated as a confirmed problem.
+
+**Other concrete gaps surfaced by this pass** (flagged only, nothing changed, per the user's
+explicit "do not modify production resource limits yet" instruction): `browseterm-pg` and
+`browseterm-redis` are bare Pods (not even Deployments) with **zero resource requests/limits
+set at all** — the shared, stateful, single-instance backbone of the entire app can currently
+consume unbounded memory. A **live config-drift**: the deployed `socket-ssh-hpa` reports
+`minReplicas=1, maxReplicas=1` (no real scaling range active), but `socket-ssh`'s own checked-out
+`infra/deployment/deployment.yaml` declares `maxReplicas: 10` — unresolved which one is stale, a
+question for a human, not a guess. 4 orphaned stale Services and 2 unbound static PVs found sitting
+around from past resume/recreate cycles, costing nothing today but unaccounted-for cruft. **No
+Prometheus/Grafana/kube-state-metrics/cAdvisor exists anywhere in this cluster** — only
+`metrics-server`/`kubectl top` (confirmed working, but snapshot-only, no history/percentiles/
+throttling counters) — the methodology's own recommendation was a minimal CSV-polling script
+using existing `kubectl top`/cgroup reads, not a full observability stack, matching the beta's
+5-user scale.
+
+## Where things stand (as of 2026-08-29 — Payments UI built and deployed; a parallel-session divergence was found and merged; Stripe Checkout chosen as the next step)
+**Built the Payments UI page from `plan.md`'s "Payments UI" section**: a `/payment` route in
+`browseterm-server` (hidden from the sidebar, reached only via redirect from `/subscriptions`'
+"Select Plan" button) showing a Plan/Price/Currency/GST/Total breakdown card and a Pay button,
+styled to match the rest of the app (mint/blue-grey palette, light+dark mode, responsive). GST is
+computed client-side at a flat 18% for now (region/discount logic explicitly deferred per
+`plan.md`, which says this will vary by country and needs a technique the user hasn't specified
+yet). Amounts stay in rupees for now — the paise/minor-unit storage migration `plan.md` mentions
+is explicitly future work, not done this session. The idempotency key `plan.md` calls for is
+generated client-side once per checkout attempt (`crypto.randomUUID()`, `payment.js`) and reused
+across retries, sent to `/create-payment` as `idempotency_key`, but **deliberately never rendered
+in the UI** — `plan.md` is explicit about this ("we'll monitor it via Grafana instead").
+
+**Mid-session discovery: a separate, parallel line of work had already pushed 6 commits ahead to
+`origin/main` for `browseterm-server`** (plus 2 on `browseterm-db`, 1 on `payment-gateway-spec`,
+1 on `payment-gateway`) that this session's standalone `browseterm-server` checkout never saw,
+because work started without first running `git fetch`. That parallel work covered much of the
+same ground independently — its own `/payment` page, its own fix for a `user_info.id` bug (see
+below), a full idempotency-key wire-through to `payment-gateway` via a new proto field, a
+last-saved/last-attempt/status widget next to the terminal page's Save button, resume-flow
+subscription-plan gating, and cleaned-up user-facing exception text — and had already been fully
+migrated into the live Postgres schema (`last_save_attempted_at` column + updated NOTIFY trigger,
+confirmed present via `psql`). Reconciled by `git stash`-ing this session's local changes, then
+`git merge --ff-only origin/main` (a clean fast-forward, since this session's HEAD was an ancestor
+of origin's), then dropping the stash once confirmed everything in it was superseded. Standing
+lesson reinforced: **always `git fetch && git log HEAD..origin/main` before starting work in any
+of this project's repos** — this is now saved as a durable cross-session note (see the top of this
+file's convention and Claude's own memory), since the project's submodule-based monorepo checkout
+and the standalone repo clones under `~/browseterm` can independently diverge and get pushed to by
+different sessions.
+
+**Two real bugs found and fixed in the merged code, both now live**:
+1. `request.state.user_info` is a plain `dict` (set from Redis session data), but
+   `create_payment` and `get_container_info` (`browseterm-server/src/api_handlers.py`) accessed it
+   as `request.state.user_info.id` instead of `['id']` — this is exactly the `'dict' object has no
+   attribute 'id'` error the user hit live on the Pay button. Fixed in both places.
+2. The parallel session's payment page rendered `Idempotency key: <code>...</code>` directly in
+   the DOM (`payment.js`) — a direct violation of `plan.md`'s explicit "do not show the idempotency
+   key in the UI" instruction. Removed the markup and its CSS.
+
+**Per user feedback, the payment page's visual format was then reverted to this session's original
+design** rather than the parallel session's — the parallel version's HTML referenced
+`.details-card`/`.buy-btn` CSS classes that are defined in `profile.css`/`subscriptions.css`, but
+`payment.html` only loads `payment.css`, so those classes were never actually styled on that page
+(a real, if minor, bug — unstyled card/button). The current `payment.html`/`payment.css`/
+`payment.js` are self-contained (define their own `.payment-card`, `.detail-item`, `.pay-btn`
+etc.), keep the idempotency-key generation/submission wired in (still never rendered), and add a
+"← Back to plans" link in the header.
+
+**Discussed Stripe integration and a double-entry ledger, neither implemented yet** (deliberately
+— see Pending below): the user chose **Stripe Checkout** (hosted redirect) over Stripe Elements or
+staying non-Stripe. Planned architecture, not yet built: `payment-gateway`'s `makePayment` RPC
+would create a Stripe Checkout Session (via the `stripe` Python SDK) and return its URL instead of
+a hardcoded `SUCCESS`; `browseterm-server` passes that URL back to the browser; `payment.js`
+redirects via `window.location.href`; new `/payment/success` and `/payment/cancel` routes handle
+the return trip; a Stripe webhook (`checkout.session.completed`, signature-verified) is the actual
+source of truth for "payment succeeded" (not the redirect alone), and is also the right trigger
+point for ledger writes. The session's own client-generated idempotency key maps directly onto
+Stripe's native `Idempotency-Key` header on the Checkout Session creation call — no redesign
+needed there. **Blocked on**: the user providing a Stripe account's test-mode API keys
+(publishable + secret, eventually a webhook signing secret) — nothing here can be built/tested
+against placeholder keys. For the ledger: recommended a `ledger_transactions` (one row per payment
+event) + `ledger_entries` (≥2 debit/credit rows per transaction, must sum to zero per currency)
+schema in `browseterm-db`, written atomically only when the Stripe webhook confirms a charge (not
+at Checkout Session creation, since that's just intent) — e.g. for a ₹500 plan + ₹90 GST: credit
+`revenue` ₹500, credit `tax_payable` ₹90, debit `cash_stripe` ₹590, with a separate entry once
+Stripe deducts its fee. This most naturally lives in `payment-gateway` (or a future dedicated
+billing service), not `browseterm-server`.
+
+**Deployed**: rebuilt and pushed both `zim95/browseterm-server:latest` and
+`zim95/payment-gateway:latest` (the latter to pick up `payment-gateway-spec`'s new
+`idempotency_key` proto field and a "log it on makePayment" change, so the Grafana verification
+`plan.md` asks for is actually possible). Both deployments restarted and confirmed
+`1/1 Running`/successfully rolled out; verified directly against the live pod (`kubectl exec` +
+`grep` on the served template/JS files, not just "looks right in the diff") that the final
+`payment.js` contains the restored format markers and does *not* contain the removed
+`idempotency-hint`/`details-card payment-card` bugs, and that `terminalpage.html` contains the
+`saveStatusInfo` save-status widget div. **One redeploy hit a real, if transient, infra issue**:
+this session ran a browseterm-server build/push concurrently with the standalone deploy work,
+and separately the host machine appears to have gone idle/asleep for several hours mid-session —
+on resume, the node briefly showed `NotReady` (unreachable-taint scheduling failures, probe
+timeouts) and one pod got stuck in `ContainerCreating` for 4+ hours with no `Pulled` event ever
+firing. Deleting the stuck pod (safe — it's a Deployment-managed replica, not stateful) let the
+ReplicaSet recreate it fresh once the node came back, which then started and became ready in
+under a minute. This is the same class of issue as the host-resource-contention lessons already
+documented in "Pickup instructions" below (item 2) and "Environment quick-reference" — **reinforce
+it, it recurred**: avoid overlapping heavy docker builds/pushes on this Mac, and after any long
+idle gap in a session, check `kubectl get nodes` before trusting any in-flight rollout status.
+
 ## Where things stand (as of 2026-08-27 — reaper/save race fixed and deployed; idle-hibernate test finally closed out)
 **Found and fixed a real bug in the reaper's hibernate flow: it could delete a pod before
 confirming the pod's own save had actually succeeded.** Root cause: an earlier session's fix to
@@ -1688,7 +1863,294 @@ fresh-init and would happen again identically for anyone else running `--fresh`.
     for production rather than continuing to hunt for more edge cases; revisit the two deferred
     items above only if they actually resurface live.
 
+## What we did today (2026-08-29 — Payments UI built and deployed, parallel-work merge, Stripe decision)
+79. **Built `browseterm-server`'s `/payment` page** per `plan.md`'s "Payments UI" section:
+    Plan/Price/Currency/GST/Total breakdown card + Pay button, reached via redirect from
+    `/subscriptions`, styled to match the rest of the app. See the top "Where things stand" entry
+    for full detail — not repeated here.
+80. **Found this session's standalone `browseterm-server` checkout was 6 commits behind
+    `origin/main`** because work started without `git fetch`ing first — a separate, parallel
+    session (working through the `browseterm-monorepo` submodule checkout) had already pushed a
+    more complete version of the same feature set. Reconciled via `git stash` + `git merge
+    --ff-only origin/main` rather than duplicating; also fast-forwarded `browseterm-db` (2 commits
+    behind — the `last_save_attempted_at` migration, already applied to the live Postgres),
+    `payment-gateway-spec` (1 commit — the `idempotency_key` proto field), and `payment-gateway`
+    (1 commit — logs `idempotency_key` on `makePayment`).
+81. **Fixed two real bugs surfaced by that merge**: `request.state.user_info.id` accessed a
+    `dict` as if it were an object (should be `['id']`) in `create_payment` and
+    `get_container_info` — this was the live `'dict' object has no attribute 'id'` error the user
+    hit on the Pay button; and the merged payment page rendered the idempotency key directly in
+    the DOM, violating `plan.md`'s explicit "don't show it" instruction. Both fixed.
+82. **Per user feedback ("I liked the UI we just had"), reverted the payment page's HTML/CSS/JS
+    to this session's original self-contained design** rather than keeping the parallel session's
+    version, after finding the parallel version's markup referenced CSS classes
+    (`.details-card`/`.buy-btn`) that were never actually loaded on that page (a real bug — the
+    card/button would have rendered unstyled). Kept the parallel version's idempotency-key
+    generation/submission logic wired into the restored markup; added the "← Back to plans" link
+    the user also asked for.
+83. **Discussed Stripe integration and a double-entry ledger design with the user** (see top
+    "Where things stand" entry for the full recommendation) — user chose Stripe Checkout (hosted
+    redirect) over Stripe Elements. Neither is implemented yet; both are blocked/deferred, see
+    Pending below.
+84. **Rebuilt and redeployed both `browseterm-server` and `payment-gateway`** to Docker Hub and
+    the cluster, verified live via `kubectl exec` + `grep` against the actual served files (not
+    just the source diff). One redeploy hit a multi-hour `ContainerCreating` stall after the host
+    appears to have gone idle for several hours mid-session (node briefly `NotReady` on resume) —
+    recovered by deleting the stuck pod and letting the ReplicaSet recreate it once the node was
+    back; no data loss, just a delayed rollout. Full detail in the top "Where things stand" entry.
+85. **Wrote this session's summary into this file** per explicit user request ("add everything to
+    progress_made.md, we will resume from there afterwards") — see items 79-84 and the top
+    "Where things stand" entry above.
+
+## What we did today (2026-08-30 — hibernate/resume/reaper Q&A, payment-gateway architecture doc, cost.md capacity methodology)
+86. **Answered three user questions about hibernate/resume/reaper by re-reading the current code**
+    (this session's local `browseterm_workload` checkout was itself found 5 commits behind
+    `origin/main` — fetched and fast-forwarded first, per the standing "always fetch before
+    answering/working" lesson from 2026-08-29): (a) the resume quota/tier check is implemented
+    (`resume_container`); (b) hibernate does delete the pod (confirmed in `container-maker`'s
+    `KubernetesContainerManager.delete()`); (c) the "reaper not deleting pods" issue was a real,
+    live bug — `_hibernate_one` passed the DB row id instead of the pod's Kubernetes UID to
+    `deleteContainer`, so the pod lookup never matched and every past hibernate silently failed to
+    remove the pod while still marking the DB row `HIBERNATED` — found and fixed (`86032fd`,
+    2026-08-25), it did not resolve itself. Full detail in the top "Where things stand" entry.
+87. **Wrote payment-gateway's current, as-built architecture into
+    `browseterm-monorepo/PAYMENTS.md`** (a new "Current Architecture (as-built, 2026-08-29)"
+    section, kept alongside the original task spec as historical context) at the user's request —
+    full request-flow diagram, exact proto contract, Kubernetes deployment/service shape, and one
+    real finding: TLS between browseterm-server and payment-gateway is server-authenticated only
+    today, not enforced mTLS, despite both sides having client-cert material mounted.
+88. **Wrote a full capacity-measurement methodology into `~/browseterm/cost.md`'s new "Claude
+    Response" section**, answering the user's detailed cost.md brief (design-the-experiment only —
+    no pricing, no code/resource-limit changes, no fabricated numbers), motivated by the user's
+    stated plan to probably disable payments and run free-tier-only, needing the minimum resources
+    that requires. Backed by two parallel read-only investigations (live cluster inspection via
+    `kubectl get/describe/top`; source-code trace of `container-maker`/`socket-ssh`/
+    `browseterm_workload`/`browseterm-server`) plus one arithmetic step combining both, all clearly
+    labeled by how each number was obtained (measured/configured/calculated/inferred/unknown) per
+    the brief's own explicit rules. Full detail, including the headline finding (platform-fixed
+    pods alone already push CPU limits to 112% before any user workspace exists, cross-validated
+    against the live node reading) and the concrete gaps found (unbounded Postgres/Redis, a
+    socket-ssh HPA config drift, orphaned Services/PVs, no Prometheus/Grafana/cAdvisor anywhere),
+    is in the top "Where things stand" entry — not fully repeated here, read `cost.md` directly for
+    the complete benchmark matrix and NEXT ACTIONS list.
+
+## What we did today (2026-08-30, later — started Browseterm V2 Cloud/Local split, P01: `devices` table)
+89. **Began implementing `FINAL_BROWSETERM_V2_IMPLEMENTATION_PLAN.md`** (new, checked in at
+    `~/browseterm/FINAL_BROWSETERM_V2_IMPLEMENTATION_PLAN.md`) — the plan to split the single k3s
+    cluster into a Cloud k3s (durable state: Postgres/Redis/OAuth) and a Local k3s running on the
+    user's Mac (ContainerMaker, Socket-SSH, status_monitor, reaper, workspace pods). This is a
+    deliberately incremental plan (`p01.md` through `P25`); this entry covers **P01 only**, per the
+    plan's own execution rule ("do not implement this whole plan at once — for each task, inspect
+    actual code, change only task scope, stop, report").
+90. **P01 — added the `devices` table to `browseterm-db`** (standalone checkout at
+    `~/browseterm/browseterm-db`, confirmed up to date with `origin/main` before starting, per the
+    standing fetch-first lesson): new `Device` SQLAlchemy model (`browseterm_db/models/devices.py`)
+    with a `DeviceStatus` enum (`ACTIVE`/`INACTIVE`/`REVOKED` — not specified verbatim by the plan,
+    chosen to fit the existing `registered_at`/`last_seen_at`/`revoked_at` columns it asked for), a
+    `users.devices` relationship (`cascade="all, delete-orphan"`, matching the existing
+    `containers`/`orders`/`subscription` pattern), a `DeviceOps` class mirroring `ContainerOps`'s
+    conventions (bulk filter-based `update`/`delete`, `UniqueConstraint('user_id', 'device_name')`
+    exactly as the plan's optional constraint suggested), both registered in `all_models.py`/
+    `all_operations.py`, a hand-written Alembic migration (`e1f2a3b4c5d6`, on top of the actual
+    current head `d3e4f5a6b7c8` — traced by hand from `down_revision` chains since a bare `alembic
+    heads` isn't runnable without the poetry env) and 8 new tests in `tests/test_device_ops.py`
+    (creation/field verification, FK-invalid-user rejection, the per-user unique device-name
+    constraint, same name across two different users, find/update, and user-delete cascade).
+    Nothing beyond P01 scope was touched (no `containers.device_id`, no `container_snapshots`, no
+    auth/server/K8s changes) — that's P02+.
+91. **Found and fixed a real, pre-existing gap in `Migrator.reset_database()`** while verifying:
+    its hardcoded `DROP TABLE`/`DROP TYPE` lists were never updated when the `images` table was
+    added, so on a real Postgres instance an `images` table used by one test run silently survives
+    a `reset_database()` call and breaks the *next* run's `CREATE TABLE images` with
+    `DuplicateTable` — reproduced directly by running the real (non-test) `versions/` migration
+    chain end-to-end against a scratch local Postgres. Added `images` (alongside the new `devices`
+    table and `devicestatus` enum) to `reset_database()`'s drop lists so the reset function actually
+    resets. This is in the same function P01 already needed to touch for `devices`, not a separate
+    refactor. Also had to add `'devices'` to the three hardcoded `required_tables` lists in
+    `tests/test_migrations.py::test_c_migrations` — an existing test that asserts the *exact* set of
+    tables Alembic creates, so adding any new table mechanically requires updating it or the test
+    fails; this is not a design change, just keeping that assertion in sync with the schema.
+92. **No local/CI Postgres was available in this environment** — `~/browseterm/browseterm-db` had
+    no `.env` and nothing was listening on 5432. Stood up a scratch Postgres 15 in Docker
+    (`docker run --name browseterm_db_test_pg ... -p 55432:5432`, `POSTGRES_DB=browseterm_test`)
+    and wrote a `.env` (gitignored, not committed) pointing `TEST_DB_*`/`DB_*` at
+    `localhost:55432`. Installed the project with `poetry env use python3.11 && poetry install`
+    (the repo pins `python = ">=3.11,<3.12"`; the Mac's default `python3` is 3.14, which has no
+    prebuilt `psycopg2`/etc wheels compatible with this project — `brew`-installed `python3.11` at
+    `/opt/homebrew/bin/python3.11` is what poetry's venv was pointed at). **Left both the Docker
+    container and the `.env` in place** (session-local, harmless, gitignored) since P02 onward will
+    keep needing the same real-Postgres test setup — a future session picking up P02+ in this repo
+    can just `docker start browseterm_db_test_pg` (or `docker ps` to check it's already running)
+    instead of re-deriving this whole setup.
+93. **Full test run result**: 96/97 tests pass across the entire `browseterm-db` suite
+    (`python -m unittest discover -s ./tests/ -p "test_*.py"`), including all 8 new device tests, all
+    of `test_user_ops.py`/`test_container_ops.py` (checking the new `users.devices` relationship and
+    model registration didn't regress anything), and `test_migrations.py::test_c_migrations` (which
+    now expects `devices` in the created-table set). The one failure,
+    `test_migrations.py::test_b_mock_unsuccessful_connection`, is **pre-existing and unrelated to
+    this work** — it hardcodes port `5432` (not read from `.env`) and expects a real Postgres server
+    to be reachable there so it can assert a specific "database does not exist" error string; in
+    this sandbox nothing listens on the standard port at all (only the scratch container on 55432
+    does), so it fails on a `Connection refused` instead. Confirmed via `git diff` that this test's
+    body was never touched by this session's changes.
+94. **Next step for a future session**: P02 — add `containers.device_id` (nullable FK to
+    `devices.id`, `ON DELETE SET NULL`, index, relationship, serialization, migration, tests) per
+    the same plan file's Section 22. Do not implement P03+ in the same pass — the plan's own rule
+    (Section 21) is one task at a time, inspect-change-test-stop-report each time.
+
+## What we did today (2026-08-30, later still — P02: `containers.device_id`)
+95. **P02 — added `containers.device_id`** in `~/browseterm/browseterm-db` (same standalone
+    checkout as P01; confirmed the actual on-disk P01 `Device`/`Container` implementation before
+    starting, per this task's explicit instruction to treat the repo, not the plan document, as
+    authoritative — it matched what P01 had built). A `P02.md` task brief (mirroring P01's own
+    `p01.md`) didn't exist in the repo; asked the user, who confirmed deriving it from the plan's
+    Section 22 P02 bullets was correct, and that a status-tracking doc should exist going forward
+    — created `~/browseterm/IMPLEMENTATION_STATE.md` for that (a P01/P02/... status table + brief
+    per-task notes; full narrative detail stays here in `progress_made.md`, this new file is just
+    the status view, so future sessions have one place to check "what's done" without reading this
+    whole diary).
+96. **Changes**: `containers.device_id` — nullable UUID FK to `devices.id`,
+    `ON DELETE SET NULL`, `idx_container_device_id` index, a `device_ref` relationship on
+    `Container` mirroring the existing `image_id`/`image_ref` pattern exactly (same naming
+    convention, same "FK column named `X_id`, relationship attribute named `X_ref`" shape), and
+    the reverse `Device.containers` relationship mirroring `Image.containers`. `device_id` is
+    serialized in `Container.to_dict()`. `ContainerOps` (`_convert_filter_value`/
+    `_convert_update_value`/`_convert_insert_value`, plus `insert()`/`insert_many()`) got
+    `device_id` wired through the same way `image_id` already was. New hand-written migration
+    `f2a3b4c5d6e7_add_device_id_to_containers.py` on top of P01's head `e1f2a3b4c5d6` (head is now
+    `f2a3b4c5d6e7`). Deliberately did **not** give `Device.containers` an ORM cascade (unlike
+    `User.devices`'s `cascade="all, delete-orphan"`) — deleting a device must only clear
+    `device_id` on its containers, never delete the containers, and that's exactly what the FK's
+    `ON DELETE SET NULL` does at the database level regardless of whether the delete SQL comes from
+    `session.delete()` or a bulk `query.delete(synchronize_session=False)`.
+97. **4 new tests** in `tests/test_container_ops.py::TestContainerDeviceAssociation`: a container
+    created without `device_id` defaults to `NULL`; creating one with a valid `device_id`
+    associates it and it's findable via `container_ops.find({"device_id": ...})`; creating one with
+    a nonexistent `device_id` fails (FK violation); deleting a device sets `device_id` to `NULL` on
+    its containers without deleting the containers. Verified against the real (non-test)
+    `versions/` migration chain too: reset → upgrade → inspect `containers` columns (has
+    `device_id`) → downgrade -1 → inspect again (column and FK gone, `devices`/`images`/etc tables
+    untouched) → re-upgrade clean.
+98. **Test run**: 100/101 pass across the full suite (`python -m unittest discover -s ./tests/ -p
+    "test_*.py"`) — the same single pre-existing, environment-only failure as P01
+    (`test_migrations.py::test_b_mock_unsuccessful_connection`, hardcodes port 5432, unrelated to
+    this work, untouched by this session). Reused the scratch Postgres container
+    (`browseterm_db_test_pg`, port 55432) and `.env` set up during P01 rather than re-deriving them.
+99. **Next step for a future session**: P03 — audit and fix current resource ownership/IDOR gaps
+    (get/list/update/delete/save/resume/activity/terminal/container-info endpoints; server derives
+    user identity from auth, never trusts a supplied `user_id`/`device_id`/`container_id`; add
+    cross-user rejection tests) per the plan's Section 22 P03 and Section 17 (Security). This one is
+    in `browseterm-server`, not `browseterm-db` — check that repo is up to date with `origin/main`
+    before starting, same fetch-first convention as always. See `IMPLEMENTATION_STATE.md` for the
+    current status table.
+
+## What we did today (2026-08-30, later still — P03/P04/P05 committed+pushed; P06: repository split + Desktop Resource MVP)
+100. **Committed and pushed P01-P05 work that had been sitting uncommitted.** `browseterm-db`'s
+    P01/P02 changes (`devices` table + `containers.device_id`) and `browseterm-server`'s P03
+    (ownership/IDOR fixes), P04 (Cloud skeleton), P05 (Device Cloud API) were all still in the
+    working tree, never committed — `git log` on both repos showed HEAD several commits behind
+    what `p.md`/`IMPLEMENTATION_STATE.md` already documented as done. Split each task's changes
+    into its own commit (one for P01+P02 combined in `browseterm-db`; separate P03/P04/P05 commits
+    in `browseterm-server`, plus one honest commit for pre-existing unrelated `templates/payment.*`
+    polish that predated P03) and pushed both repos' `main` to `origin` before touching anything
+    else, so the repository-split work below started from a clean, coherent history.
+101. **P06 — repository boundary correction.** The plan's P04/P05 had `browseterm-server` carrying
+    two entrypoints (`app.py` = old combined local+auth+container app, `cloud_app.py` = Cloud
+    skeleton/Device API) as migration scaffolding — not the real target architecture. Corrected
+    this into two physically separate repos:
+    - **`browseterm-server`** (existing repo, history preserved) — trimmed to Cloud-only:
+      `cloud_app.py` renamed to `app.py` (now the only entrypoint); removed `src/api_handlers.py`,
+      `template_handlers.py`, `status_listener.py`, `src/containers`, `src/payments`,
+      `src/data_models`, container/image DB ops, OAuth-issuance-specific auth modules, templates,
+      dev/prod k8s manifests, and their tests (all moved to Local, not deleted); kept `src/cloud/*`
+      and the `authenticate_session` decorator + its transitive user/subscription DB-lookup
+      dependents (Cloud's Device API already needs these per P05, and Cloud legitimately owns
+      direct `users`/`subscriptions` Postgres access). `pyproject.toml` trimmed to
+      fastapi/uvicorn/redis/browseterm-db only. 33/33 tests pass.
+    - **`browseterm-server-local`** (brand-new repo, `github.com/Zim95/browseterm-server-local`,
+      public, `main`) — a clean-initial-commit extraction of everything else: the untouched local
+      browser server (OAuth login, container/workspace CRUD with P03's fixes intact, SSE,
+      payments, ContainerMaker/Socket-SSH integration, templates), plus two genuinely new modules
+      that never touch `browseterm_db`/`POSTGRES_*`/`REDIS_*`: `src/cloud_client/` (the sole
+      Local→Cloud HTTPS boundary, wrapping P05's Device API; auth is an interim pre-P07 session
+      cookie, since Cloud and Local still share one Redis) and `desktop/` (Mac-only `rumps`
+      menu-bar Desktop Resource MVP — hardware detection via `sysctl`/`shutil`, allocation
+      validation as defense-in-depth, device register/update/heartbeat handling P05's real
+      non-idempotent 409-on-duplicate semantics, report-only local server/k3s health, Open
+      Browseterm). 159/160 tests pass (1 failure is the same pre-existing unrelated
+      `test_process_user_info_success` documented since P03). Chose a clean initial commit over a
+      history-preserving split because the Local-owned files were scattered across the tree and
+      `session_manager.py`/`authentication_helpers.py` had to be *duplicated* into both repos
+      (Cloud's Device API and Local's existing routes both need the same session-validation code
+      pre-P07), which a subtree split can't express. Full audit table (every `browseterm_db`/
+      `DB_CONFIG`/`POSTGRES_*`/`REDIS_*` occurrence, which future Pxx task removes it) is in
+      `~/browseterm/CURRENT_TASK_STATE.md` and `~/browseterm/p.md`'s P06 section — Local is NOT
+      yet fully off direct central-DB access (that's intentional, documented debt for
+      P07/P10/P12/P13, not an oversight).
+102. **Monorepo sync**: bumped the `browseterm-db` and `browseterm-server` submodule pointers to
+    the commits pushed above, and added `browseterm-server-local` as a new submodule
+    (`.gitmodules` updated). This entry plus the `.DS_Store`/`PAYMENTS.md` changes already sitting
+    uncommitted in this repo were committed together.
+103. **Next step for a future session**: P07 — Cloud OAuth/session migration (server-side OAuth
+    `state`, Cloud Redis session issuance, one-time Local handoff, Local session exchange, session
+    refresh, correct logout). This is what finally lets `browseterm-server-local` drop its direct
+    Redis/Postgres session dependency and gives Desktop a real device-scoped credential instead of
+    the interim `BROWSETERM_SESSION_COOKIE` env var. See `~/browseterm/p.md`'s P06 section and
+    `FINAL_BROWSETERM_V2_IMPLEMENTATION_PLAN.md` Section 22 P07 before starting.
+
 ## Pending / not yet verified
+- [ ] **`browseterm-pg` and `browseterm-redis` have zero resource requests/limits set** (found
+      2026-08-30 during the cost.md capacity investigation) — both are bare Pods, not even
+      Deployments, and can currently consume unbounded memory. Deliberately not fixed this
+      session (cost.md's brief explicitly said don't modify production resource limits during the
+      measurement-design phase) — this is listed as NEXT ACTION #5 in `cost.md`'s Claude Response
+      section: give both real limits before running any 5-concurrent-user load test, so an OOM
+      event's root cause isn't muddied by an unrelated unbounded neighbor.
+- [ ] **`socket-ssh-hpa` live config drift** (found 2026-08-30) — the deployed HPA reports
+      `minReplicas=1, maxReplicas=1` (no real scaling range active), but `socket-ssh`'s own
+      checked-out `infra/deployment/deployment.yaml` declares `maxReplicas: 10`. Needs a direct
+      human answer (was the live HPA deliberately pinned down, or is it stale?) before it's relied
+      on for any capacity/load-test conclusion — not something to guess or silently reconcile.
+- [ ] **Capacity-measurement benchmark matrix designed but not yet run** (`cost.md`'s Claude
+      Response section, 2026-08-30) — the actual numbers (per-workspace/per-terminal CPU+memory,
+      CPU throttling under load, 5-concurrent-user behavior) still need real experiments; see that
+      file's own "NEXT ACTIONS" list for the exact order (clean platform baseline first, then a
+      minimal `kubectl top`+cgroup polling script since no Prometheus/Grafana exists, then
+      single-workspace scenarios, then the 5-user scenarios). This is the direct path to answering
+      the user's actual question ("minimum resources for 5 free-tier-only users").
+- [ ] **4 orphaned stale Services + 2 unbound static PVs found in the cluster** (2026-08-30,
+      `cost.md` investigation) — leftover from past workspace resume/recreate cycles and from an
+      earlier PV/PVC setup respectively. Cost nothing today (no compute/traffic to them) but are
+      unaccounted-for cruft; low priority, clean up opportunistically rather than urgently.
+- [ ] **payment-gateway TLS is not actually mutual** (found 2026-08-30 while writing
+      `PAYMENTS.md`'s architecture section) — `grpc.ssl_server_credentials(...)` is called without
+      `require_client_auth=True`, so the client cert `browseterm-server` presents is never
+      verified, even though full mTLS-capable cert material exists and is mounted on both sides.
+      Fix is a one-line `require_client_auth=True` plus reading the already-mounted `CLIENT_KEY`/
+      `CLIENT_CRT` env vars in `payment-gateway`'s own code — not done, not urgent (internal-only
+      traffic, ClusterIP, no public exposure), but should not be assumed to already be enforced.
+- [ ] **Stripe Checkout integration** — user chose this over Stripe Elements (2026-08-29). Not
+      started: needs the user to provide a Stripe account's test-mode publishable + secret keys
+      (and eventually a webhook signing secret) before any of `payment-gateway`'s `makePayment` →
+      Stripe Checkout Session creation, the `/payment/success`/`/payment/cancel` routes, or webhook
+      handling can be built/tested. See the 2026-08-29 "Where things stand" entry for the planned
+      architecture (webhook is the source of truth, not the redirect; our idempotency key maps to
+      Stripe's own `Idempotency-Key` header).
+- [ ] **Double-entry ledger** — design recommended (2026-08-29, see "Where things stand"):
+      `ledger_transactions` + `ledger_entries` tables in `browseterm-db`, written atomically only
+      on Stripe webhook confirmation, most naturally owned by `payment-gateway`. Not implemented —
+      blocked behind the Stripe decision above (no real money-movement event to hang ledger writes
+      off yet).
+- [ ] **GST/region/discount logic is still a flat 18%-if-INR placeholder** (`payment.js`,
+      `computeBreakdown`) — `plan.md` explicitly flags that this will vary by country and that
+      discounts will exist eventually, and says "I will post techniques to add those things in
+      place" — don't build region/discount logic speculatively, wait for that follow-up.
+- [ ] **Amounts are still stored/displayed in rupees, not paise** — `plan.md` calls out moving to
+      minor-unit (paise) storage for clean currency conversion via a future third-party API, but
+      says this is separate future work, not part of the UI change done this session. Note the
+      gRPC layer (`payment_types.proto`'s `amount_minor`) already uses minor units end-to-end;
+      only `browseterm-db`'s `subscription_types.amount` (a `DECIMAL(10,2)` in rupees) and the
+      frontend's display math would need to change.
 - [x] ~~Grant Terminal.app Full Disk Access~~ — **done this session**: user
       granted it, `sudo tmutil addexclusion -p "/var/root/Library/Application
       Support/multipassd"` ran successfully (confirmed via `tmutil isexcluded` →
@@ -1864,10 +2326,27 @@ fresh-init and would happen again identically for anyone else running `--fresh`.
    either; only revisit if one actually surfaces live, and if so capture full
    evidence (`kubectl describe`, logs) from the failing pod *before* its TTL
    expires, unlike this session's dockerd investigation.
-4. **The user's stated next focus is production-readiness/payments, not further
-   crash/hibernation work** — see `PAYMENTS.md` at the monorepo root for whatever
-   standing plan already exists there (not reproduced here; read it fresh rather
-   than assuming this file's summary of it is current).
+4. **The Payments UI (`plan.md`'s "Payments UI" section) is now built and deployed** (2026-08-29 —
+   see the top "Where things stand" entry). **The concrete next step is Stripe Checkout
+   integration** — the user chose hosted Stripe Checkout over Stripe Elements; this is blocked on
+   the user providing Stripe test-mode API keys, so ask for those before writing any Stripe code.
+   A double-entry ledger design is recommended but also not started, and depends on the Stripe work
+   landing first (ledger entries get written on webhook confirmation). See `PAYMENTS.md` at the
+   monorepo root for whatever earlier standing plan exists there too (not reproduced here; read it
+   fresh rather than assuming this file's summary is complete).
+4a. **Before starting any work in this project, `git fetch` every repo you're about to touch and
+   check `git log HEAD..origin/main`** — this session lost time duplicating a payments-page/bugfix
+   effort that a parallel session had already pushed further ahead, purely from skipping this
+   check (2026-08-29, see "Where things stand"). The project's submodule-based monorepo checkout
+   and the standalone repo clones under `~/browseterm` can independently diverge.
+4b. **The user is considering disabling payments and running free-tier-only** (2026-08-30) — before
+   that decision, they need real minimum-resource numbers, not the calculated/inferred ones this
+   session produced. `~/browseterm/cost.md`'s "Claude Response" section has the full measurement
+   methodology and a "NEXT ACTIONS" list — if asked to continue this thread, start there rather
+   than re-deriving the plan, and follow that file's own ordering (clean platform baseline first,
+   then build the small polling script it describes, then single-workspace scenarios, then 5-user
+   scenarios). Do not skip straight to a 5-user load test before Postgres/Redis have real resource
+   limits (Pending list) — an OOM under load would be ambiguous about which unbounded pod caused it.
 5. Every time you fix something, verify it against the real running app
    (browser or an actual API call, or a direct `psql`/`kubectl exec` check),
    not just "the config looks right" — this has been true of literally every
