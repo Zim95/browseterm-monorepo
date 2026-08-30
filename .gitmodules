@@ -37,3 +37,6 @@
 [submodule "browseterm-server-local"]
 	path = browseterm-server-local
 	url = https://github.com/Zim95/browseterm-server-local.git
+[submodule "browseterm-desktop"]
+	path = browseterm-desktop
+	url = https://github.com/Zim95/browseterm-desktop.git
