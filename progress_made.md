@@ -2670,3 +2670,22 @@ validated end-to-end)
     via a clean pre-P15 `git stash` still failing the same way) - each file individually, against
     a disposable throwaway Postgres, is the reliable way to verify a change here. 12 new tests.
     Commit pushed: `browseterm-db` (`fd936cd`).
+128. **P16 — Snapshot allocation API, implemented.** New Cloud endpoint
+    `POST /internal/containers/{container_id}/snapshots/allocate` (same trusted-SYSTEM-caller
+    pattern as P09/P14) implements the plan's exact algorithm: reuse an existing
+    `(container_id, request_id)` row verbatim if found (idempotent retry), else read-then-write
+    `containers.next_snapshot_sequence` (a plain increment - the plan explicitly tolerates
+    version-number gaps after crashes) and create a new `Pending` row. New
+    `SNAPSHOT_REGISTRY_REPO_PREFIX` builds the flat, UUID-based `image_repository` the plan's
+    registry strategy requires. `poetry update browseterm-db` first, to pick up P15's new
+    `SnapshotOps`/`ContainerSnapshot`. 143/143 tests (6 new). Hit and fixed a real deploy-tooling
+    gap along the way: a `k3d image import` interrupted mid-transfer left the cluster silently
+    serving the previous image under the same tag (`docker images` looked correct locally the
+    whole time) - caught because the first live call returned FastAPI's own bare
+    `{"detail":"Not Found"}`, not this endpoint's JSON error shape, exactly what a genuinely
+    absent route looks like. Fixed via a `--no-cache` rebuild + a full, unhurried `k3d image
+    import`, confirmed via `kubectl exec ... grep` against the pod's own `app.py` before retrying.
+    Then live-verified the real idempotency guarantee (not just the happy path): same
+    `request_id` twice returns the identical `snapshot.id`; a different `request_id` correctly
+    advances the sequence. Commit pushed: `browseterm-server` (`1e297f1`, includes an earlier
+    `312e94f`).
