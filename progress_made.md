@@ -2850,3 +2850,29 @@ validated end-to-end)
     hostname that only resolves via one Mac's `/etc/hosts`, so a real fix isn't achievable in this
     local dev cluster regardless of effort spent. No repo commits this pass (live-fix +
     gitignored-local-config only) beyond the `env.mk` correction.
+135. **P23 — Two-cluster bootstrap, implemented.** "Every script checks kube context before
+    applying" - verified this genuinely didn't exist anywhere in the project
+    (`grep -rln "current-context\|kubectl config"` across every repo's setup scripts returned
+    nothing) and added an identical, minimal, optional guard (compares an `EXPECTED_KUBE_CONTEXT`
+    arg against `kubectl config current-context`, aborts before applying on a mismatch) to the
+    setup scripts for every cluster this project actually targets:
+    `browseterm-server/cloud-setup.sh`, `browseterm-server-local`'s dev+prod setup,
+    `postgres_ha`/`redis_ha`'s single-instance setup scripts. Verified live that the guard
+    actually blocks a mismatched context before touching anything. Second major discovery this
+    session while pulling `redis_ha` before editing it (the P21-established "always re-check
+    divergence first" discipline): another account-owner commit this session had no knowledge
+    of, whose own message says "hit live this session after a **Multipass VM** restart" - proof
+    of a SECOND real, independently-operated production target (beyond container-maker's
+    single-node k3s host referenced in P21) this session has zero visibility into, where the
+    account owner independently hit and fixed the exact same Redis ACL persistence bug this
+    session found and fixed on the k3d cluster in P22 - both fixes converged on the identical
+    technical answer, made independently. Also caught and fixed a real process mistake in the
+    same breath: committing directly inside a `browseterm-monorepo` submodule checkout (instead
+    of the standalone clone) landed on a detached HEAD, so `git push` silently reported
+    "up-to-date" while the real commit sat orphaned - caught via `git branch -v` immediately
+    after, fixed by re-doing the edit through the proper standalone clone and confirming every
+    other submodule copy touched this session was NOT similarly affected. No test changes
+    (shell-script-only pass). Commits pushed: `browseterm-server` (`1074249`),
+    `browseterm-server-local` (`6d782d0`), `postgres_ha` (`34fb57b`), `redis_ha` (`f913cab`,
+    also carries the account owner's own ACL-persistence commit), `browseterm-monorepo`
+    (`4575f67`, submodule sync).
