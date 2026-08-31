@@ -2712,3 +2712,27 @@ validated end-to-end)
     `snapshot_job` itself still isn't live-deployed (needs container-maker, same as
     `status_monitor`/`socket-ssh`). Commits pushed: `browseterm-server` (`fd7a2fb`),
     `browseterm_workload` (`c980eec`).
+130. **P18 — Reaper migration, implemented.** First P-item where Hibernate's resource-release
+    accounting (deferred explicitly in both P12's and P14's write-ups) became load-bearing -
+    reaper's whole job is executing exactly that transition. `browseterm-db`'s
+    `find_idle_containers` gained an optional `device_id` scope ("the reaper must operate only on
+    containers whose device_id is the current device"). Two new Cloud endpoints: a device-scoped
+    idle query, and a compound hibernate transition (`status=HIBERNATED`, `device_id=NULL`,
+    device resource reservation released via the same `_release_device_resources` helper
+    `delete_container` already uses - closing the "Hibernate" half of P12's deferred note).
+    `reaper` itself rewritten onto a new `cloud_client.py` (mirrors `status_monitor`'s/
+    `snapshot_job`'s own) replacing the deleted `db_ops.py` - the save→confirm→delete→hibernate
+    ordering and per-container failure isolation are completely unchanged, only the storage
+    boundary moved. New required `DEVICE_ID` config surfaces a real, explicitly documented
+    deployment-sequencing gap (a device doesn't exist until Desktop's bootstrap flow has run,
+    which happens after this CronJob's manifest would normally be applied) - `main.py` fails fast
+    rather than silently scanning nothing. `browseterm-db`: 22/22 (1 new). Cloud: 157/157 (8
+    new). `reaper`: 16/16 - its entire pre-existing test suite carried forward with only the
+    mocking boundary changed, plus a new `test_cloud_client.py` preserving the deleted
+    `test_db_ops.py`'s full `wait_for_save_terminal` polling-behavior coverage. Live-verified the
+    full Cloud-side flow end to end against a real device/container: idle-list correctly scoped
+    by device, hibernate confirmed via direct Postgres reads to correctly set
+    `status=HIBERNATED`/`device_id=NULL`/zero out `used_*` together, not just one piece.
+    `cert-manager` is now the only `browseterm_workload` component still holding a direct
+    `DB_PASSWORD`. Commits pushed: `browseterm-db` (`2d935cc`), `browseterm-server` (`a369dc6`),
+    `browseterm_workload` (`d664d2c`).
