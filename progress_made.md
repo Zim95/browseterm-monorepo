@@ -2573,3 +2573,32 @@ validated end-to-end)
     module and a `readCertificates` export mismatch, neither touches `authenticate.js`/Redis).
 119. Synced this monorepo's submodule pointers for `browseterm-server` (`5689b33`), `socket-ssh`
     (`428494c`).
+120. **P10 — Cloud SSE, implemented.** Cloud now owns Postgres LISTEN/NOTIFY directly and pushes
+    container status/save-status updates to the browser over its own `GET /events/stream`
+    (`src/cloud/sse_broadcaster.py`/`sse_handlers.py`, new `SSEBroadcaster` singleton wrapping
+    `browseterm_db`'s pre-existing `PGListener` in a background thread via a new FastAPI
+    `lifespan`). Auth via a new `sse_token` (query string, `EventSource` can't set headers) that
+    resolves only to a session_id - never a client-supplied `user_id`, matching the plan's
+    explicit P10 instruction. `browseterm-server-local`'s old `status_listener.py` (an interim
+    polling relay against Cloud's `/containers` API) and its `/container-status-stream` endpoint
+    are removed entirely - the browser connects to Cloud directly now, with reconnect-triggers-
+    full-refetch reconciliation in `terminals.js`.
+121. Along the way, found and fixed a real gap: this session's own `~/browseterm/browseterm-db`
+    working tree had been silently squashed by an earlier (accidental) run of that repo's
+    documented-destructive `python init.py`, dropping 17 real migration files from disk without
+    ever committing/pushing the loss (so `git status` against origin looked clean the whole time
+    - only `git status --porcelain` right before writing a new migration caught it, showing a
+    wall of unexpected local deletions). Restored via `git checkout -- 
+    browseterm_db/migrations/versions/` - turned out the real trigger migrations P10 needed
+    (`a1b2c3d4e5f6`/`e5f6a7b8c9d0`/`d3e4f5a6b7c8`) already existed in git history, so no
+    `browseterm-db` code changes were needed at all. Separately, the live Cloud k3d cluster's
+    actual Postgres had never had that real migration chain applied (seeded via the same
+    squash-and-recreate path at cluster setup time) - fixed by hand-applying the real trigger SQL
+    and correcting `alembic_version` to the real chain's head revision.
+122. Verified P10 genuinely end-to-end against the real k3d clusters, not just reasoned about:
+    `PGListener` receiving real `pg_notify` payloads from a live `UPDATE`, both Cloud and Local
+    redeployed live with clean startup logs, and a full browser-equivalent round trip (real
+    Cloud session -> real sse_token -> real `GET /events/stream` -> real DB `UPDATE` -> event
+    delivered with the exact field names the frontend already expects). Cloud: 114/114 (14 new).
+    Local: 106/106. Commits pushed: `browseterm-server` (`37064db`), `browseterm-server-local`
+    (`4fefb08`).
