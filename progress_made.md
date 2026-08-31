@@ -2491,3 +2491,62 @@ validated end-to-end)
       p.md's P07 section's "Explicitly Out of Scope").
 - [ ] **No device-revoke HTTP endpoint** — storage (`DeviceTokenManager.revoke_token`) supports it,
       P05 never had one either, out of P07's stated scope.
+
+## What we did today (2026-08-31, later still — P07 follow-up, SETUP docs, P08 clarified, P09 implemented)
+
+113. **P07 follow-up: session refresh + a real logout CSRF bug.** User asked a design question
+    about session refresh/SSE architecture (see this session's design discussion, not reproduced
+    here); while answering it, realized the original plan's P07 scope explicitly listed "session
+    refresh" as its own item, missed in the first P07 pass. Added `POST /auth/refresh`
+    (`browseterm-server-local`) and `base.js`'s `SessionRefreshManager` (polls every 10 min,
+    redirects to `/login` on a 401). While writing handler-level tests for this (a real coverage
+    gap — the first P07 pass never tested `api_handlers.py`'s routes, only `AuthenticationService`'s
+    own methods), found that `LogoutManager.handleLogout()` never sent the `X-CSRF-Token` header
+    the new CSRF check requires — clicking Logout in the real UI 403'd on `/logout` (session never
+    revoked server-side) but still redirected to `/login` regardless, silently looking like it
+    worked. Fixed both, redeployed to `browseterm-k3s-local`, verified live. Commit `c4ba7c5`.
+114. **`SETUP-CLOUD.md`/`SETUP-LOCAL.md`** added at the monorepo root — the actual, verified
+    step-by-step procedure for standing up each `k3d` cluster from nothing (every command in them
+    was really run this session, not written from memory). Monorepo `README.md`'s microservices
+    list corrected for the P06/P07 split (was still describing `browseterm-server` as handling
+    OAuth+sessions+Postgres+Redis directly, no `browseterm-server-local`/`browseterm-desktop`
+    entries at all) and the old Docker-Desktop+MetalLB "Development Setup Guide" section flagged
+    as superseded rather than silently left looking current. Commit `cfe5dcf`.
+115. **P08 clarified, not implemented — it was already done.** User asked "what is P08 and P09"
+    mid-session. Checked `FINAL_BROWSETERM_V2_IMPLEMENTATION_PLAN.md`'s actual P08 definition
+    ("stand up `browseterm-server-local`: existing UI/templates, Cloud health/session client, no
+    Cloud DB/Redis credentials") against what P06 already delivered (see that section above) —
+    same thing, already done. The plan's phase numbering and the actual commit history simply
+    diverged (P06's repository-boundary correction absorbed what the plan called P08). No code
+    changed for P08 specifically; documented in `p.md`'s new "P08" section so this doesn't get
+    re-asked/re-attempted later.
+116. **P09 — status_monitor Cloud API migration, implemented.** Per the plan's exact P09
+    definition ("replace direct DB writes with authenticated Cloud status API, keep pod watcher
+    logic unchanged, verify DB trigger/NOTIFY still fires"). New Cloud endpoint `POST
+    /internal/containers/{container_id}/status` (internal-token-gated, no `user_id` — status_monitor
+    is a trusted cluster-wide system caller, not acting for any specific user) supports an optional
+    `expected_status` for an atomic compare-and-swap, reproducing the old `mark_lost_if_running`'s
+    exact semantics. `status_monitor`'s `src/db_ops.py` rewritten to call it via a new minimal
+    `src/cloud_client.py`; `browseterm_db` removed from its `pyproject.toml` entirely (no Postgres
+    credential in this component any more at all). **`src/pod_watcher.py` untouched** — verified by
+    running its existing test suite unmodified alongside the rewritten `test_db_ops.py`, all 23
+    pass. **Not deployed live** — status_monitor needs container-maker (stamps the pod labels it
+    watches for) to have anything to watch, and container-maker is still deferred (see item 111);
+    the DB trigger/NOTIFY-still-fires claim is reasoned from the fact that Cloud's new endpoint
+    issues the identical SQL `UPDATE` on the same table, not re-verified live — flagged in `p.md`'s
+    P09 section as needing a real check once status_monitor is actually deployed. Cloud commit
+    `7201dd0`, `browseterm_workload` commit `d13c48e`.
+117. Synced this monorepo's submodule pointers for `browseterm-server-local` (`c4ba7c5`),
+    `browseterm-server` (`7201dd0`), `browseterm_workload` (`d13c48e`).
+
+## Pending / not yet done (added 2026-08-31, this session)
+- [ ] **A live `LISTEN`/`NOTIFY` re-verification for P09** — reasoned but not tested live (see
+      item 116) — do this once `status_monitor` is actually deployed alongside container-maker.
+- [ ] **`reaper`/`snapshot_job`/`cert-manager` still hold direct `DB_PASSWORD` credentials** — the
+      plan's P09 item names only `status_monitor`; migrating the others is a natural follow-up in
+      the same shape (new Cloud endpoints + a small `cloud_client.py` each), not attempted here.
+- [ ] **P10 (Cloud SSE) and beyond** — see this session's design discussion (browser connects
+      directly to Cloud's SSE, reusing the existing one-time-WebSocket-token pattern, rather than
+      Cloud relaying to "the active Local instance" — each user's Local runs on their own Mac,
+      which has no reliable inbound reachability, confirmed by checking
+      `FINAL_BROWSETERM_V2_IMPLEMENTATION_PLAN.md`/`plan.md`/`newplan.md`). Not started.
