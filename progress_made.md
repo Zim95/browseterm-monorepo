@@ -2602,3 +2602,18 @@ validated end-to-end)
     delivered with the exact field names the frontend already expects). Cloud: 114/114 (14 new).
     Local: 106/106. Commits pushed: `browseterm-server` (`37064db`), `browseterm-server-local`
     (`4fefb08`).
+123. **P12 — Cloud workspace metadata/create APIs, implemented.** `POST /containers` now requires
+    `device_id`/`cpu_limit`/`memory_limit`/`storage_limit`, validates the device (found + ACTIVE)
+    and the request against the device's `allocated - used` capacity, and reserves usage
+    (increments `used_cpu`/`used_memory_bytes`/`used_storage_bytes`) before creating the row -
+    released back if the insert then fails, matching the plan's own P12 bullet order exactly.
+    `POST /containers/{id}/delete` releases a container's reserved resources on success. New
+    dependency-free `src/cloud/resource_quantity.py` parses the Kubernetes resource-quantity
+    strings (`"500m"`, `"2Gi"`) these fields use, since Cloud still doesn't depend on the
+    `kubernetes` client library at all. Hibernate/Resume accounting deliberately not wired up
+    this pass (the plan's own P12 checklist only covers the create path; see `p.md` for why).
+    129/129 tests (15 new). Verified live end-to-end against the real k3d cluster: registered a
+    real device via device-bootstrap, created a container and confirmed `used_cpu`/
+    `used_memory_bytes`/`used_storage_bytes` incremented correctly, confirmed an over-capacity
+    request gets rejected, deleted the container and confirmed usage released back to the
+    device's original capacity exactly. Commit pushed: `browseterm-server` (`be7c7e0`).
