@@ -2824,3 +2824,29 @@ validated end-to-end)
     "container-maker not deployed in this project's k3d clusters" gap as P09/P17/P18. Commits
     pushed: `container-maker` (`1a98ed2`), `browseterm-server-local` (`711768e`), `socket-ssh`
     (`ee847ac`), `browseterm-monorepo` (`b886510`, submodule sync).
+134. **P22 — Cloud infra, implemented.** Confirmed the live Cloud PG/Redis are the single-instance
+    path (`pg_single`/`redis_single`), correctly matching the plan's "No HA redesign" - not
+    something to change. Found and fixed a real, live authentication-persistence bug in Cloud
+    Redis: the running pod had NO `--aclfile` flag despite the committed manifest having one (it
+    predated that manifest change and was never recreated), so the `browseterm` ACL user existed
+    only in Redis's in-memory state with zero disk persistence - `ACL SAVE` even failed outright.
+    The next restart for ANY reason would have silently reverted Redis to its unauthenticated
+    default user, breaking browseterm-server's Redis connection and briefly leaving the session
+    store open to anyone inside the cluster network. Asked the user before touching a live
+    stateful service - confirmed to proceed. Recreating hit Redis 7.4's actual boot behavior (it
+    aborts startup entirely on a configured-but-missing aclfile, not the softer "starts
+    unauthenticated" the setup script's own comment implied) - worked around via a short-lived
+    helper pod mounting the same PVC to create an empty file first, then re-ran the ACL setup for
+    real. Verified twice via a second full pod recreation that persistence genuinely survives a
+    restart now, and confirmed browseterm-server's own `/healthz` reported clean
+    `{"postgres":"ok","redis":"ok"}` afterward. Also fixed a stale `REDIS_DATA_DIR` value in
+    `redis_ha`'s gitignored `env.mk` that surfaced during the first (safely-rejected) recreate
+    attempt. Verified migrations/triggers clean (live `alembic_version` matches the latest
+    migration exactly; both P10 NOTIFY triggers present). Verified and documented, rather than
+    attempted, a real TLS gap: Cloud's public ingress is plain HTTP today (no cert-manager, no
+    ClusterIssuer, `ssl-redirect: false`) - deliberately not fixed this pass, both because the
+    referenced "existing cert-manager manifests" the plan expects turned out to be a genuinely
+    unfinished doc, and because Let's Encrypt structurally cannot issue a trusted cert for a
+    hostname that only resolves via one Mac's `/etc/hosts`, so a real fix isn't achievable in this
+    local dev cluster regardless of effort spent. No repo commits this pass (live-fix +
+    gitignored-local-config only) beyond the `env.mk` correction.
