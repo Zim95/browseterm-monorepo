@@ -2765,3 +2765,32 @@ validated end-to-end)
     grep` before considering the deploy done; Local's own `/resume-container` HTTP endpoint was
     not exercised end-to-end (needs container-maker, still deferred since P07). Commits pushed:
     `browseterm-server` (`e19dc21`), `browseterm-server-local` (`003ca6a`).
+132. **P20 — Registry verification, implemented.** An audit item, not a build item: verified every
+    place a Docker Hub account is baked into an image reference and judged each on its own merits
+    rather than blanket-replacing `zim95`. Base-image catalog seed data (`zim95/ssh_ubuntu:latest`
+    in `browseterm-db`'s `images.json`) is legitimate and untouched, per the plan's own explicit
+    "do not blindly change base-image seed refs" warning. P15's 5-part version tags and P17's
+    digest parsing were both already correct. The one real gap: `SNAPSHOT_REGISTRY_REPO_PREFIX`
+    was never actually set in Cloud's deployment manifest, silently relying on its code default
+    (`"browseterm"`) with nobody having verified that namespace existed on Docker Hub. Asked the
+    user rather than guessing; with their explicit authorization, created a real `browseterm`
+    Docker Hub Organization (owner: `zim95`) via Docker Hub's Hub API using credentials from
+    `~/browseterm/dockercreds`, confirmed live, then wired `SNAPSHOT_REGISTRY_REPO_PREFIX`
+    explicitly end to end (`env.mk` → `Makefile` → `cloud-setup.sh` → `cloud.yaml`). Applying that
+    manifest change via `make setup` then **crash-looped the live Cloud deployment** - caught and
+    fixed within the same turn: the Makefile's `setup` recipe passed `$(VAR)` args to
+    `cloud-setup.sh` unquoted, and three genuinely-missing `env.mk` values
+    (`BROWSETERM_LOCAL_CALLBACK_URL`/`BROWSETERM_ALLOWED_HOSTS`/`CLOUD_INGRESS_HOST`, a
+    pre-existing gap unrelated to P20) each vanished from the actual shell command instead of
+    becoming empty args, shifting every later positional argument left by one - `POSTGRES_HOST`
+    ended up on the script's own nonexistent-Service fallback default
+    (`browseterm-db-service`), and the live Ingress host briefly became the literal string
+    `browseterm`. Fixed by quoting every arg in the Makefile (so a missing value can only ever
+    break its own slot, never shift what follows) and recovering the three missing `env.mk`
+    values from the still-healthy old pod's own live env plus `/etc/hosts` - not invented.
+    Re-applied cleanly; confirmed the full deployment (Ingress host, all affected env vars)
+    restored correctly, not just the one var this pass set out to add. `snapshot_job` itself still
+    isn't live-deployed, so nothing was ever actually pushed through the new org end to end (needs
+    container-maker, deferred since P07). Commits pushed: `browseterm-server` (`1acc7bf`
+    registry-prefix wiring, `10555d1` Makefile quoting fix), `browseterm-monorepo` (`62b98a1`,
+    submodule sync).
