@@ -2617,3 +2617,25 @@ validated end-to-end)
     `used_memory_bytes`/`used_storage_bytes` incremented correctly, confirmed an over-capacity
     request gets rejected, deleted the container and confirmed usage released back to the
     device's original capacity exactly. Commit pushed: `browseterm-server` (`be7c7e0`).
+124. **P13 — Local create path, implemented.** Cloud's `POST /containers` `device_id` is now
+    optional - auto-resolves the caller's currently-ACTIVE device when omitted, since
+    `browseterm-server-local` has no established way to learn its own device_id (device
+    registration is a `browseterm-desktop`-only concept). `create_container_in_k8s` (Local) now
+    best-effort releases the DB row + Cloud resource reservation if the real ContainerMaker/K8s
+    call fails - previously that leaked forever and blocked any retry under the same name.
+125. Live-verifying P13 (the first request this session actually originating from inside a Local
+    pod rather than curl from the host) surfaced two real, previously-invisible deployment gaps
+    breaking *every* internal-token-gated Local->Cloud call in this live cluster, not just P13's:
+    `browseterm.cloud.com` resolved to `127.0.0.1` from inside a `browseterm-k3s-local` pod (two
+    separate k3d clusters on one Mac, each its own Docker bridge network - fixed with a
+    `hostAliases` entry pointing at Docker Desktop's `host.docker.internal`), and
+    `CLOUD_INTERNAL_API_TOKEN` was never wired into either Local deployment manifest at all
+    (silently defaulting to empty string, every internal-token call 401ing) - fixed by adding it
+    from the same `browseterm-internal-api-token` Secret Cloud itself reads. Both applied live
+    first to finish verifying P13, then committed into the manifests/scripts/README properly.
+    Full E2E through a real ContainerMaker/K8s pod stays blocked on container-maker still not
+    being deployed (same documented limit as every prior P-item) - confirmed that's genuinely the
+    remaining blocker, not a P13 regression, via the pod's own logs showing the request correctly
+    reaching Cloud and only failing at `ContainerService.__init__`'s certs lookup.
+    Cloud: 131/131 (2 new). Local: 109/109 (3 new). Commits pushed: `browseterm-server`
+    (`a967d9a`), `browseterm-server-local` (`8cc7bf3`).

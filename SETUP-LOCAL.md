@@ -82,11 +82,31 @@ docker tag browseterm-server-development:latest zim95/browseterm-server:latest
 k3d image import zim95/browseterm-server:latest -c browseterm-k3s-local
 ```
 
+Create the `browseterm-internal-api-token` Secret in this cluster too (P13 - see `p.md`'s P13
+section) — must hold the **exact same value** as the one you created for Cloud in step 4, or
+every internal-token-gated Local→Cloud call (session validate, container CRUD, catalog,
+sse-tokens) silently gets a 401:
+
+```bash
+kubectl --context k3d-browseterm-k3s-local -n browseterm create secret generic browseterm-internal-api-token \
+  --from-literal=CLOUD_INTERNAL_API_TOKEN=<same value as Cloud's>
+```
+
+Determine the IP two separate k3d clusters on this same Mac need to reach each other through (P13
+— pods can't see the host-only `/etc/hosts` override from step 2, and each cluster is its own
+Docker bridge network, so cross-cluster traffic has to go via the host's `host.docker.internal`):
+
+```bash
+docker run --rm alpine getent hosts host.docker.internal | awk '{print $1}'
+# e.g. 192.168.65.254
+```
+
 Create/edit `env.mk` in this repo (see its own README's "Dev Setup" section — `NAMESPACE`,
 `REPO_NAME`, `BROWSETERM_CLOUD_API_URL=http://browseterm.cloud.com:9999`, `POSTGRES_*`
 placeholders matching step 3 above, `SOCKET_SSH_*`/`PAYMENT_GATEWAY_*`/`CONTAINER_MAKER_*`
 placeholders since those services aren't deployed yet, `INGRESS_HOST=browseterm.local.com`,
-`COOKIE_SECURE=false`, `COOKIE_SAMESITE=lax`), then:
+`COOKIE_SECURE=false`, `COOKIE_SAMESITE=lax`, `CLOUD_INGRESS_HOST=browseterm.cloud.com`,
+`CLOUD_INGRESS_HOST_IP=<the IP from the command above>`), then:
 
 ```bash
 kubectl config use-context k3d-browseterm-k3s-local
