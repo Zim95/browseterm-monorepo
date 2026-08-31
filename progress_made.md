@@ -2357,6 +2357,19 @@ fresh-init and would happen again identically for anyone else running `--fresh`.
    read stays fast even as the file grows across many sessions.
 
 ## Environment quick-reference
+
+**SUPERSEDED as of 2026-08-31 (see "What we did today" entry below) — this Multipass-VM section
+describes an architecture iteration that is no longer what's running.** The user confirmed the
+actual current setup is two `k3d` clusters, `k3d-browseterm-k3s` (Cloud) and
+`k3d-browseterm-k3s-local` (Local) — Docker containers, not a Multipass VM; no MetalLB (k3d's own
+port-mapped loadbalancer + ingress-nginx instead); `/etc/hosts` now points
+`browseterm.local.com`/`browseterm.cloud.com` at `127.0.0.1`, not `192.168.252.200`. No committed
+script builds these `k3d` clusters yet (they were stood up manually this session) — see the P07
+entry below and each repo's own README "Dev Setup" section for the current `k3d`-based
+instructions, including the Traefik-port-conflict gotcha. Left the old section below intact
+rather than deleting it, in case the Multipass path is ever revived, but do not trust it as
+current state without verifying `kubectl config get-contexts` first.
+
 - VM: `browseterm-k3s` @ 192.168.252.2 (Ubuntu 24.04, 4 CPU / 8GB / 40GB)
 - Ingress external IP: 192.168.252.200 (real routed LoadBalancer via MetalLB,
   **not** `kubectl port-forward` — traffic genuinely flows browser → that IP →
@@ -2390,3 +2403,91 @@ fresh-init and would happen again identically for anyone else running `--fresh`.
   "responsive". If the app is unreachable despite healthy-looking pods, check
   `kubectl get jobs -n browseterm` for anything with an unexpectedly long
   `DURATION` before looking anywhere else.
+
+## What we did today (2026-08-31 — P07 Cloud-owned authentication, implemented + deployed +
+validated end-to-end)
+
+108. **Started from a support request, not a planned task**: user reported the `browseterm-desktop`
+    app (built the same session, see prior entries) showing a blank green screen with no login
+    buttons. Root-caused through several layers: (1) the app's own reachability check was working
+    correctly and already showing a clear "can't reach the server" error card — the real issue was
+    one level down; (2) `browseterm.local.com` resolved but timed out; (3) Docker Desktop's own VM
+    had actually crashed (`com.docker.virtualization: Process terminated unexpectedly`, consistent
+    with this project's long-documented swap-pressure pattern — swap was at ~89% throughout this
+    session); (4) after restarting Docker, the two `k3d` clusters the user said should exist
+    (`k3d-browseterm-k3s`, `k3d-browseterm-k3s-local`) were completely gone — `k3d cluster list`
+    empty, zero `k3d-*` containers — the VM crash wiped Docker's container/volume state entirely,
+    not just paused it.
+109. **Recreated both `k3d` clusters** (`browseterm-k3s` -p 9999:80@loadbalancer,
+    `browseterm-k3s-local` -p 80:80@loadbalancer — ports match `browseterm-server`/
+    `browseterm-server-local`'s own existing URL conventions) with **no surviving script,
+    volume, or config to reconstruct from** — verified via `docker volume ls`/`docker network ls`
+    (empty), grep across every repo + `.zsh_history` (nothing). The only prior deploy script found
+    (`browseterm-monorepo/scripts/setup.sh`) is stale: it assumes a single `docker-desktop`
+    cluster + MetalLB and deploys `browseterm-server` (Cloud) into the same namespace as
+    container-maker/socket-ssh/payment-gateway — i.e. it predates the P06 Cloud/Local repository
+    split and doesn't reflect the two-cluster topology at all. User confirmed by direct
+    instruction: Cloud cluster = `browseterm-server`+Postgres+Redis; Local cluster =
+    `browseterm-server-local`+container-maker+socket-ssh+workloads (the latter two + payment-
+    gateway/workloads deliberately not deployed this session — see item 111).
+110. **User then pointed at a new spec file, `~/browseterm/p07.md`** ("AUTHORITATIVE
+    IMPLEMENTATION SPECIFICATION", supersedes prior P07 instructions) and asked for it to be
+    implemented, deployed, validated, committed/pushed, and documented — all in the same request.
+    Implemented in full across all three repos: Cloud OAuth start/callback/state (Redis, GETDEL
+    single-use), one-time handoff (`local_login` + `device_bootstrap` purposes), per-device Bearer
+    credentials (SHA-256-hashed in Redis, one token per device, independently scoped/revocable),
+    Device API migrated from session-cookie to Bearer-device-token auth, `browseterm-server-local`
+    stripped of all OAuth code/secrets (deleted `oauth_service.py` outright, fixed a real
+    pre-existing bug where `logout()` never passed `session_id` through so the Redis session
+    survived "logout" indefinitely), `browseterm-desktop` migrated off the P06 interim
+    `BROWSETERM_SESSION_COOKIE` mechanism onto a macOS-Keychain-stored device token obtained via a
+    one-time bootstrap. TrustedHost added to Cloud; CORS deliberately not added (documented — no
+    browser JS ever calls Cloud directly). Full technical writeup, including every Redis key
+    convention/TTL, is in `p.md`'s "P07 — Cloud-Owned Authentication" section (that's the
+    authoritative reference now, not this entry) — `CURRENT_TASK_STATE.md` has the shorter
+    checkpoint version. Tests: Cloud 87/87, Local 96/96, Desktop 9/9 (all passing before deploy).
+111. **Deployed and validated live** — real infra work, not just "kubectl apply and hope": found
+    and fixed a genuine `k3d` gotcha (k3s's bundled Traefik, not disabled at cluster-creation time,
+    was squatting on host ports 80/443 via its own `svclb`, leaving ingress-nginx's `svclb` stuck
+    `Pending` on both clusters — fixed via `kubectl -n kube-system delete helmchart traefik`, now
+    documented in both `browseterm-server`'s and `browseterm-server-local`'s READMEs); fixed a
+    stale `/etc/hosts` duplicate the user's own `sudo sed` attempt left behind (two
+    `browseterm.local.com` lines, the old `192.168.252.200` one still shadowing the new
+    `127.0.0.1` one since `/etc/hosts` resolves top-down — caught and had the user delete the
+    stale line rather than silently editing a system file myself twice). Built+deployed
+    `browseterm-server` (Cloud) via `k3d image import` (no registry push needed) against fresh
+    Postgres/Redis (`postgres_ha`/`redis_ha`'s existing single-instance scripts, reusing the
+    already-provisioned `PG_PASSWORD`/`REDIS_PASSWORD` from the monorepo's aggregated `env.mk`),
+    schema initialized via `browseterm-db/init.py` through a port-forward. Built+deployed
+    `browseterm-server-local` (Local) the same way. **Verified against real, live infrastructure,
+    not mocks**: `curl http://browseterm.cloud.com:9999/healthz` → Postgres/Redis both `ok`;
+    `http://browseterm.local.com/login` renders the new plain `/auth/google`/`/auth/github` links;
+    hitting `/auth/google` on Local correctly chains through Cloud's `/auth/google/start` all the
+    way to Google's *real* OAuth consent screen with the correct `client_id` and the new
+    `/auth/google/callback` redirect URI (same for GitHub); handoff/device-bootstrap endpoints
+    correctly 401 on invalid/missing credentials. The one remaining external step — **the new
+    `http://browseterm.cloud.com:9999/auth/{google,github}/callback` redirect URIs need to be
+    added to the actual Google Cloud Console / GitHub OAuth App settings** — is the account
+    owner's to do; until then a real human login hits `redirect_uri_mismatch` at the very last
+    step, after everything this session built has already been proven correct.
+112. **Committed and pushed all three repos separately** (`browseterm-server` `1b0b957`,
+    `browseterm-server-local` `d7731fa`, `browseterm-desktop` `04091fe`), then synced this
+    monorepo's submodule pointers to match (see this commit).
+
+## Pending / not yet done (added 2026-08-31, P07 session)
+- [ ] **Register the new OAuth callback URLs** with Google/GitHub (external, account-owner-only —
+      see item 111). Nothing in these repos is blocked on it; it only blocks a real human login.
+- [ ] **container-maker, socket-ssh, payment-gateway, and `browseterm_workload` were not deployed**
+      to either new `k3d` cluster this session — deliberately deferred (unrelated to P07, building
+      +deploying ~4 more services is a separate substantial effort). Local's login/OAuth/handoff/
+      device-bootstrap flow doesn't need them; anything that does (actual terminal creation, etc.)
+      will 404/timeout until they're deployed too.
+- [ ] **No committed script builds the two `k3d` clusters from scratch** — they were created with
+      ad-hoc `k3d cluster create` commands this session (see item 109's port mappings), not a
+      checked-in setup script. A future `browseterm-k3s-local`-as-easy-Mac-cluster script (flagged
+      as not-yet-done since the P06 addendum, still true) should probably absorb this.
+- [ ] **Device token scopes are issued but not individually enforced** (`["device:read",
+      "device:update", "device:heartbeat"]` — any valid token can currently do all three; see
+      p.md's P07 section's "Explicitly Out of Scope").
+- [ ] **No device-revoke HTTP endpoint** — storage (`DeviceTokenManager.revoke_token`) supports it,
+      P05 never had one either, out of P07's stated scope.
