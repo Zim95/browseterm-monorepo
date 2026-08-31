@@ -2550,3 +2550,26 @@ validated end-to-end)
       Cloud relaying to "the active Local instance" — each user's Local runs on their own Mac,
       which has no reliable inbound reachability, confirmed by checking
       `FINAL_BROWSETERM_V2_IMPLEMENTATION_PLAN.md`/`plan.md`/`newplan.md`). Not started.
+
+## What we did today (2026-08-31, later still — P11 implemented)
+
+118. **P11 — Socket-SSH Redis removal, implemented.** New Cloud endpoint `POST
+    /auth/websocket-tokens/consume` (`RedisSessionManager.consume_websocket_token`, atomic
+    `GETDEL` on `ws_token:*`) - deliberately **public, no internal-service-token check**, unlike
+    every other route added in P07/P09: socket-ssh has no shared secret, and holding a valid
+    one-time token is itself sufficient authorization (same reasoning as P07's handoff/device-
+    bootstrap redemption). `socket-ssh/src/authenticate.js` rewritten to call it via `fetch`
+    instead of `ioredis` directly - `ioredis` removed from `package.json` entirely.
+    `authenticateRequest`'s signature/return value unchanged, so `server.js` needed zero changes.
+    New `tests/authenticate.test.js`, 6/6 pass. Found (via `git status` before editing, this time
+    actually checked) that `socket-ssh`'s `origin/main` had 2 commits this session's earlier work
+    didn't have (`fb1a9d6` HPA pin, `d4dc6b0` ingress idle-timeout fix, both from routine ops work
+    elsewhere) - merged cleanly (`428494c`), no conflicts, both changes coexist correctly in
+    `deployment.yaml`. Cloud commit `5689b33`, socket-ssh commit `428494c` (merge).
+    **Not deployed live** - same reasoning as P09: socket-ssh's value only shows up with a real
+    terminal connection, which needs container-maker (still deferred). Pre-existing, unrelated
+    `ssh.test.js`/`server.test.js` collection failures found and left alone (confirmed via
+    `git stash` to be identical on a clean pre-P11 checkout - missing `@kubernetes/client-node`
+    module and a `readCertificates` export mismatch, neither touches `authenticate.js`/Redis).
+119. Synced this monorepo's submodule pointers for `browseterm-server` (`5689b33`), `socket-ssh`
+    (`428494c`).
