@@ -2639,3 +2639,20 @@ validated end-to-end)
     reaching Cloud and only failing at `ContainerService.__init__`'s certs lookup.
     Cloud: 131/131 (2 new). Local: 109/109 (3 new). Commits pushed: `browseterm-server`
     (`a967d9a`), `browseterm-server-local` (`8cc7bf3`).
+126. **P14 — Resource reconciliation, implemented.** New `status_monitor/src/resource_reconciler.py`
+    - a second, independent periodic poller (run alongside `pod_watcher.py`'s real-time watch via
+    `asyncio.gather`, deliberately not threaded through it) that lists currently-`Running` managed
+    pods every 5 minutes and reports their container_ids to Cloud's new
+    `POST /internal/devices/resources/reconcile`. Cloud sums each reported container's parsed
+    cpu/memory/storage per device and **overwrites** the cached `used_*` counters P12 introduced -
+    repairing drift from a missed release, a retried request, or manual DB surgery. Known,
+    deliberate v1 limitation documented in `p.md`: a device whose containers have all stopped
+    running isn't reset to zero by this alone (needs the caller to assert which devices it's
+    authoritative for, not just which containers are running - genuinely new design surface left
+    for a future pass, in the same category as P12's deferred Hibernate/Resume accounting).
+    Verified live not just as an echo-back but as a real repair: registered a device, created a
+    real container, directly corrupted the device's `used_*` fields in Postgres to simulate real
+    drift, called the reconcile endpoint, and confirmed both the response and a direct `SELECT`
+    showed the fields correctly restored to the container's actual parsed resource limits.
+    Cloud: 137/137 (6 new). status_monitor: 30/30 (7 new). Commits pushed: `browseterm-server`
+    (`61b908f`), `browseterm_workload` (`35c3170`).
