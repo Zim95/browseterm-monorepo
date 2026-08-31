@@ -2656,3 +2656,17 @@ validated end-to-end)
     showed the fields correctly restored to the container's actual parsed resource limits.
     Cloud: 137/137 (6 new). status_monitor: 30/30 (7 new). Commits pushed: `browseterm-server`
     (`61b908f`), `browseterm_workload` (`35c3170`).
+127. **P15 — Snapshot DB migration, implemented.** New `container_snapshots` table (`ContainerSnapshot`
+    model, `SnapshotOps`, mirroring `DeviceOps`'s exact conventions) and
+    `containers.next_snapshot_sequence` (the atomic version counter P16 will use) in
+    `browseterm-db`. `container_snapshots.container_id`'s FK uses a real DB-level
+    `ON DELETE CASCADE` (not just an ORM-level one - `ContainerOps.delete()`'s bulk
+    `query.delete()` bypasses ORM cascades entirely, a real gap caught before it shipped). New
+    `browseterm_db/common/snapshot_version.py` formats the plan's 5-part dotted-decimal version
+    string from the raw integer sequence. Hand-written Alembic migration (down_revision the real
+    chain's actual head), applied live to the real Cloud cluster's Postgres and verified via `\d`.
+    Also found and documented (README) a pre-existing, unrelated test-suite fragility running
+    many `browseterm-db` test files back-to-back via `unittest discover` in one process (confirmed
+    via a clean pre-P15 `git stash` still failing the same way) - each file individually, against
+    a disposable throwaway Postgres, is the reliable way to verify a change here. 12 new tests.
+    Commit pushed: `browseterm-db` (`fd936cd`).
