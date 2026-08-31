@@ -2736,3 +2736,32 @@ validated end-to-end)
     `cert-manager` is now the only `browseterm_workload` component still holding a direct
     `DB_PASSWORD`. Commits pushed: `browseterm-db` (`2d935cc`), `browseterm-server` (`a369dc6`),
     `browseterm_workload` (`d664d2c`).
+131. **P19 — Cross-device resume, implemented.** Closes the "Resume" half of the Hibernate/Resume
+    resource-accounting story P12 first flagged as deferred and P18 partially closed (Hibernate's
+    release half). New Cloud endpoint `POST /containers/{id}/resume` (user-scoped, not the
+    trusted-SYSTEM-caller pattern - Local calls it on a real user's behalf): a compare-and-swap
+    transition (`expected_status=HIBERNATED`, the same pattern P09's `update_container_status`
+    established) so two concurrent resume attempts for the same container can never both win,
+    resolves/validates the resuming device the same auto-resolve-to-ACTIVE-device pattern P13
+    uses, reserves that device's capacity from the container's own already-stored resource limits
+    (resume never changes size), and confirms the CAS's real outcome by re-reading the row rather
+    than trusting `ContainerOps.update()`'s `.success` alone (it reports success even on zero rows
+    matched, same semantic preserved everywhere else). `browseterm-server-local`'s
+    `resume_container` handler now calls this instead of transitioning RESUMING itself; a new
+    `resumed` flag gates what happens on a later pod-start failure - once Cloud's transition has
+    succeeded, the rollback reuses the existing P18 hibernate endpoint as-is (already does exactly
+    the right thing) rather than a new dedicated "cancel resume" endpoint or the old
+    `status=FAILED` marking, which would otherwise leave a dangling device reservation forever.
+    While fixing the existing test suite for the new `CloudClient`-based flow, caught an unrelated
+    file (`test_ownership_idor.py`) making a genuine, unmocked HTTP call to Cloud from a test
+    that predated this change - fixed alongside. Cloud: 164/164 (7 new). `browseterm-server-local`:
+    111/111 overall; `test_resume_container.py` itself 25/25 (one test replaced, two new P19-
+    specific rollback tests added). Live-verified Cloud's endpoint end to end against a real
+    device/container: hibernate → resume with explicit `device_id` → confirmed `status`/
+    `device_id`/`used_cpu` all transitioned correctly → a second resume on the same container
+    correctly 409'd with no double-reservation → simulated rollback via hibernate confirmed
+    `device_id` cleared and `used_cpu` back to `0`. `browseterm-server-local` rebuilt (`--no-cache`)
+    and redeployed to `browseterm-k3s-local`, new code confirmed present via `kubectl exec ...
+    grep` before considering the deploy done; Local's own `/resume-container` HTTP endpoint was
+    not exercised end-to-end (needs container-maker, still deferred since P07). Commits pushed:
+    `browseterm-server` (`e19dc21`), `browseterm-server-local` (`003ca6a`).
