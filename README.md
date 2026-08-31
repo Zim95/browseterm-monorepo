@@ -55,8 +55,16 @@ Here are all the services that browseterm has:
     **Description:** Implements the Container Maker Spec. Uses the Kubernetes API to create/delete/save the user's linux container pods (a single, unprivileged ubuntu SSH container — no sidecar) and launches snapshot Jobs. Stamps each pod with the `browseterm/managed` + `browseterm/container-id` labels the status_monitor watches.  
   
 **9. Browseterm-Server:**  
-    **Type:** MicroService (main backend).  
-    **Description:** FastAPI API + web UI. Handles OAuth login, talks to container-maker (gRPC/mTLS), Postgres (via BrowsetermDB), Redis (sessions), and cert-manager; hands the browser the socket-ssh WebSocket URL.  
+    **Type:** MicroService (Cloud control plane).  
+    **Description:** *(P06 split this repo Cloud-only; P07 made it the sole OAuth authority — the description below no longer matches, see 9b/9c.)* FastAPI API. Owns Postgres/Redis (via BrowsetermDB) for central state (users, subscriptions, devices, containers), the Device API, and as of P07 all Google/GitHub OAuth (start/callback/state/handoff, one-time device-bootstrap for Desktop). Deployed into its own cluster, `browseterm-k3s` — see `SETUP-CLOUD.md`.  
+  
+**9b. Browseterm-Server-Local:**  
+    **Type:** MicroService (Local control plane — runs on each user's own Mac).  
+    **Description:** FastAPI API + web UI (login/home/terminals/profile/subscriptions templates). Holds no Postgres/Redis client at all — every read/write of central state goes through Cloud's HTTP API via `src/cloud_client/`. Talks to container-maker (gRPC/mTLS) and socket-ssh locally, hands the browser the socket-ssh WebSocket URL. Deployed into its own cluster, `browseterm-k3s-local` — see `SETUP-LOCAL.md`.  
+  
+**9c. Browseterm-Desktop:**  
+    **Type:** Native macOS app (`pywebview`).  
+    **Description:** The Mac tray/window app users actually launch: shares Local's real login page/OAuth flow (no separate implementation), detects this machine's hardware, and — after login — bootstraps a long-lived per-device Bearer credential (macOS Keychain-stored) used for the Device API, independent of the browser session.  
   
 **10. Browseterm-Storage:**  
     **Type:** Python Library.  
@@ -76,7 +84,17 @@ $ git submodule update --init --recursive
 
 ---
 
-# Development Setup Guide (Docker Desktop, step-by-step)
+> **For current setup instructions, use [`SETUP-CLOUD.md`](./SETUP-CLOUD.md) and
+> [`SETUP-LOCAL.md`](./SETUP-LOCAL.md) instead of the section below.** As of P06/P07
+> (2026-08-31), the architecture is two separate clusters — `browseterm-k3s` (Cloud: Postgres,
+> Redis, `browseterm-server` — sole OAuth authority) and `browseterm-k3s-local`
+> (`browseterm-server-local` + eventually container-maker/socket-ssh/payment-gateway/workloads)
+> — deployed with `k3d`, not the single Docker-Desktop cluster + MetalLB this section describes.
+> The section below predates that split (it deploys OAuth-handling `browseterm-server` alongside
+> container-maker/socket-ssh in one cluster/namespace) and is kept for reference only, not as a
+> working guide. See `progress_made.md`'s 2026-08-31 entries for the full migration history.
+
+# Development Setup Guide (Docker Desktop, step-by-step) — SUPERSEDED, see notice above
 
 ## Quick start
 
