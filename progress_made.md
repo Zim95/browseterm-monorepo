@@ -2794,3 +2794,33 @@ validated end-to-end)
     container-maker, deferred since P07). Commits pushed: `browseterm-server` (`1acc7bf`
     registry-prefix wiring, `10555d1` Makefile quoting fix), `browseterm-monorepo` (`62b98a1`,
     submodule sync).
+133. **P21 — Local infra/security split, implemented.** Important discovery first: `container-maker`
+    had diverged 10 commits from what this session tracked, all authored directly by the account
+    owner, fixing real live-cluster-observed snapshot/save-Job bugs - meaning **container-maker has
+    actually been run and iterated on live**, contradicting this whole session's repeated
+    "container-maker still isn't live-deployed" framing for that one component. One of those
+    commits was an independently-authored, byte-for-byte-identical fix to the exact same Makefile
+    positional-arg-shift bug found in P20; another had already implemented gVisor sandboxing
+    correctly for a real single-node k3s PROD host this session has no visibility into. This
+    session's own first-draft P21 fix would have wrongly defaulted gVisor OFF (based on checking
+    only the local k3d dev clusters, which don't have a `gvisor` RuntimeClass registered) -
+    caught via `git stash` + diff-against-origin before anything was pushed, not after. Lesson
+    banked: never assume `container-maker` is idle; always re-check divergence immediately before
+    editing it specifically. Two real, verified bugs found and fixed after that: (1)
+    `POD_CIDR`/`SERVICE_CIDR` defaulted to docker-desktop's Kubernetes ranges, not k3s's real ones
+    (verified live against `browseterm-k3s-local`) - meaning the per-tenant NetworkPolicy's "deny
+    internal cluster access" carve-out was a complete no-op, letting untrusted user-pod egress
+    potentially reach other tenants/Postgres/Redis/MinIO despite the policy's own name; (2)
+    container-maker's gRPC server never passed `require_client_auth=True` to
+    `ssl_server_credentials`, so despite a full client-cert chain being provisioned end to end, the
+    server accepted ANY TLS client regardless of whether it presented one - one-way TLS, not mTLS,
+    directly answering the plan's own explicit "do not call it mTLS unless verified" instruction.
+    The identical gap in `payment-gateway` was left untouched, per the plan's explicit "DO NOTHING"
+    for payments. Also proactively fixed the same Makefile arg-shift bug class in
+    `browseterm-server-local` and `socket-ssh` (neither had triggered it yet, but both had it).
+    ResourceQuota/LimitRange, tenant RBAC (correctly minimal - no k8s API access for tenant pods
+    at all), and MinIO config were all reviewed and found already correct. `container-maker`:
+    57/57 (post-pull, unaffected by this pass's two fixes). Neither fix live-redeployed - same
+    "container-maker not deployed in this project's k3d clusters" gap as P09/P17/P18. Commits
+    pushed: `container-maker` (`1a98ed2`), `browseterm-server-local` (`711768e`), `socket-ssh`
+    (`ee847ac`), `browseterm-monorepo` (`b886510`, submodule sync).
