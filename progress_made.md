@@ -2689,3 +2689,26 @@ validated end-to-end)
     `request_id` twice returns the identical `snapshot.id`; a different `request_id` correctly
     advances the sequence. Commit pushed: `browseterm-server` (`1e297f1`, includes an earlier
     `312e94f`).
+129. **P17 — Snapshot job migration, implemented.** The first P-item since P09 to migrate an
+    already-running workload's real DB path (not just add new Cloud surface). New Cloud endpoint
+    `POST /internal/containers/{container_id}/snapshots/{snapshot_id}/report` updates both the
+    `container_snapshots` row and the owning `containers` row's `save_status`/`save_error` (the
+    frontend's SSE feed is driven by `containers`' own trigger, not `container_snapshots`) -
+    `saved_image`/`last_saved_at` only ever set on `Succeeded` (plan: "on failure, saved_image
+    must remain unchanged"). `snapshot_job` rewritten: allocates (P16) before building, tags with
+    the Cloud-allocated versioned reference instead of `latest`, parses the registry digest out
+    of its own `docker push` output, reports Running/Succeeded/Failed through Cloud instead of
+    writing to Postgres directly - `browseterm-db` dependency removed entirely. New
+    `src/cloud_client.py` (mirrors `status_monitor`'s, P09) replaces the deleted `db_ops.py`
+    (which also removed `update_saved_image`, found to already be dead code). Deleted three heavy
+    real-Postgres-plus-real-Docker integration test files whose whole premise (direct DB access)
+    no longer exists; new `test_main.py` covers the new orchestration directly. Cloud: 149/149 (6
+    new). snapshot_job: 22/22 net of 3 confirmed pre-existing unrelated failures. This time the
+    Cloud redeploy followed P16's own lesson exactly - waited for `k3d image import` to genuinely
+    finish before rolling out, confirmed the new route in the pod's `app.py` first - and landed
+    clean on the first try. Live-verified the full P16→P17 chain end to end against a real
+    device/container: allocate → report Running (confirmed via `GET /containers`) → report
+    Succeeded with a digest (confirmed `saved_image`/`last_saved_at` updated correctly).
+    `snapshot_job` itself still isn't live-deployed (needs container-maker, same as
+    `status_monitor`/`socket-ssh`). Commits pushed: `browseterm-server` (`fd7a2fb`),
+    `browseterm_workload` (`c980eec`).
