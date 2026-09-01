@@ -2876,3 +2876,18 @@ validated end-to-end)
     `browseterm-server-local` (`6d782d0`), `postgres_ha` (`34fb57b`), `redis_ha` (`f913cab`,
     also carries the account owner's own ACL-persistence commit), `browseterm-monorepo`
     (`4575f67`, submodule sync).
+136. **Live bug fix: "Error listing containers" on browseterm.local.com.** User reported a raw
+    Kubernetes 404 (`secrets "container-maker-service-certs" not found`) surfacing to the browser
+    when loading the terminal list. Root cause: `ContainerService.__init__` unconditionally read
+    container-maker's mTLS cert from its Kubernetes Secret and opened a gRPC channel on every
+    instantiation, but 5 of its 8 methods (including `list_user_containers`, the one actually
+    hit) are pure DB operations that never touch that channel at all - so a plain "list my
+    containers" call required infrastructure (container-maker's certs) it never needed, and
+    failed outright since container-maker isn't deployed on this Local k3d cluster. Fixed by
+    making the cert read/channel setup lazy (`_ensure_grpc_client()`, called only from inside the
+    three methods that actually call container-maker). New
+    `tests/unit/containers/test_container_service_lazy_grpc.py` (4 tests, including the exact
+    regression: listing succeeds even when the cert read would raise).
+    `browseterm-server-local`: 115/115. Rebuilt, redeployed to `browseterm-k3s-local`, confirmed
+    live via `kubectl exec ... grep` before considering it done. Commit pushed:
+    `browseterm-server-local` (`f8b0468`).
