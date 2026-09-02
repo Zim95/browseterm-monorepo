@@ -2891,3 +2891,46 @@ validated end-to-end)
     `browseterm-server-local`: 115/115. Rebuilt, redeployed to `browseterm-k3s-local`, confirmed
     live via `kubectl exec ... grep` before considering it done. Commit pushed:
     `browseterm-server-local` (`f8b0468`).
+137. **Desktop login moved to the system browser.** User hit an unusual Google verification
+    challenge during login through the Desktop app's WebView - root cause: Google (and
+    increasingly GitHub) actively block/challenge OAuth from an embedded WebView as a long-
+    standing anti-phishing policy, exactly what the original P07 design (WebView loads Local's
+    real `/login` directly) hits. Fixed by moving OAuth to the system browser: the WebView now
+    shows a small local "Log in" page; clicking it starts a one-shot loopback HTTP server on
+    127.0.0.1 and opens Local's login with `?target=desktop&desktop_port=<n>` in the real system
+    browser. Zero changes to Cloud's OAuth surface - `target` stays `"local"` the whole way
+    through; Local's `auth_provider_redirect` just sets a short-lived, one-shot cookie before
+    redirecting to Cloud, and `auth_callback` (same browser tab, cookie survives the round trip)
+    mints a device-bootstrap code server-side and redirects to the loopback server with it
+    instead of Local's home page. The port is the only caller-supplied value in that redirect,
+    strictly validated as a plain TCP port with the host hardcoded to 127.0.0.1, closing off any
+    open-redirect concern. `browseterm-server-local`: 123/123 (8 new) + new Jest
+    `login.test.js` (4 tests). `browseterm-desktop`: 16/16 (6 new, including a full round-trip
+    test of the whole login flow with a real loopback server). Live-verified the HTTP wiring
+    directly (cookie-setting, login.js threading the params onto the provider buttons) and via a
+    real launch of the app (screenshot confirmed the system browser opened correctly) - full
+    OAuth completion handed to the user to verify interactively. Commits pushed:
+    `browseterm-server-local` (`9d9847e`), `browseterm-desktop` (`c7d187c`), `browseterm-monorepo`
+    (`7fc300e`, submodule sync).
+138. **container-maker migrated off direct Postgres access.** User: audit "the entire local
+    stack" for direct DB access and replace it with Cloud API calls. Found one remaining holdout
+    (every other Local component was already migrated earlier this session or in P11):
+    `container-maker`, holding a real Postgres credential directly in two places - `containers.py`'s
+    save() self-heal (a drifted kubernetes_id correction) and the save reconciler's stuck-save
+    sweep/mark-failed logic. Added three new trusted-SYSTEM-caller Cloud endpoints (`GET`/`POST
+    /internal/containers/{id}`, `GET /internal/containers/stuck-saves`) and a new
+    `container-maker/src/cloud_client.py` (same shape as status_monitor's/snapshot_job's/
+    reaper's own) to replace the direct `ContainerOps` calls. Found and fixed a second, unrelated
+    dead-code path along the way: `job_manager.py` was still injecting a DB credentials Secret
+    into every snapshot Job's env, even though P17 already removed `browseterm-db` from the Job's
+    own image entirely - removed, and in its place discovered a real separate P17 gap
+    (`BROWSETERM_CLOUD_API_URL`/`CLOUD_INTERNAL_API_TOKEN` were never actually injected into the
+    Job's env at all, meaning the Job's own Cloud API calls would have 401'd every time) - fixed.
+    container-maker's manifests/scripts/Makefile updated to match. `browseterm-server`: 176/176
+    (12 new). `container-maker`: 59/59, three test files rewritten to mock the Cloud client
+    instead of `ContainerOps`. Cloud redeployed live and verified directly (`GET .../stuck-saves`
+    returns real data, `GET`/`POST /internal/containers/{id}` correctly 404/200 against a real
+    UUID). `container-maker` itself remains not live-deployed to either k3d cluster in this
+    project - this migration is correct and ready, not yet exercised end to end through a real
+    save. Commits pushed: `browseterm-server` (`8912fea`), `container-maker` (`229c044`),
+    `browseterm-monorepo` (`07baaa4`, submodule sync).
