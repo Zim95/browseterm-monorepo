@@ -28,6 +28,1055 @@ likely just that cache lag, not a sign the rewrite didn't take — re-check
 `git log --grep="anthropic.com" -i` on that repo's `main` before assuming
 otherwise.
 
+## SESSION RECAP + PICKUP POINT (2026-09-10 session, written on explicit request so the next
+## session can pick this up without re-deriving it) — READ THIS FIRST, then the detailed
+## "Where things stand" entries immediately below go deeper on any one item.
+
+**Where this session started**: device-based (OAuth Device Authorization Grant) login for the
+Desktop app didn't exist yet - that was the very first ask. **Where it ended**: login works
+end-to-end for Google (GitHub is wired up too but blocked on the account owner enabling "Device
+Flow" on the GitHub OAuth App - a manual console step, not code), the local k3d cluster's Setup
+button deploys a genuinely working local stack, terminal creation is quota-based instead of
+subscription-based, and a long chain of real, previously-undiscovered bugs across almost every
+local-stack component got found and fixed along the way - see below for the full list. Nothing
+was committed to git this entire session (this project's standing "only commit when explicitly
+asked" rule) - see the "Uncommitted changes, by repo" list at the end of this entry before
+starting anything new, so work isn't accidentally lost or double-done.
+
+### What got built
+- **OAuth Device Authorization Grant login** (`browseterm-server` Cloud endpoints `/auth/device/
+  start`+`/auth/device/poll`, `browseterm-desktop`'s login flow rewritten around them) - replaces
+  the old system-browser-+-loopback design entirely (deleted, not kept as a fallback) because that
+  design needed Local reachable to log in at all, which needed a cluster, which needed login first
+  - a real chicken-and-egg this breaks. Google works for real (live-verified against the actual
+  Google API). GitHub (`GithubDeviceAuthService`) is fully wired up in code but will 502 until the
+  GitHub OAuth App has Device Flow enabled - tracked, not blocking.
+- **`BROWSETERM_CLOUD_INTERNAL_API_TOKEN` and the token in `~/.browseterm/cloud_internal_api_token`
+  file** (not an env var you export every launch) - `desktop/config.py` reads the file, falls back
+  to the env var only as an override.
+- **Device-quota-based terminal creation** (per explicit request: no more subscription-based
+  `max_containers` gating). Cloud's `POST /containers` already did the real device-quota
+  reservation (P12/P13, pre-existing, just discovered this session) - the actual fix was deleting
+  the *separate* subscription-tier check in Local (`is_user_within_container_limit`, now gone
+  entirely) that ran before Cloud's own check ever got a chance. The create-terminal form now
+  shows real remaining quota ("/ N cores", "/ N GiB"), lets typing directly into the fields (no
+  more `readonly`), and disables Create when a value is out of bounds - both live and re-checked
+  once more right before submitting.
+- **Subscriptions commented out** (nav link + route, per "we don't need subscriptions for now") -
+  backend plan-gating logic elsewhere (`resume_container`) deliberately untouched.
+- **Profile page shows "Current Device"** instead of "Current Plan" - needed a new Cloud endpoint
+  (`GET /internal/users/{user_id}/active-device`) since Local has no device Bearer token of its
+  own to ask the Bearer-gated `/devices` route directly.
+- **Setup now installs ingress-nginx** (removing k3s's bundled Traefik first) - it never did this
+  before at all; `browseterm.local.com` was completely unreachable until this was added, on any
+  cluster Setup ever created. Idempotent + self-healing (a cluster that already exists from before
+  this fix corrects itself on the next Setup click, no Teardown needed).
+- **Pod monitor re-scoped to the actual always-on local-stack workloads** (container-maker,
+  socket-ssh, browseterm-server, status-monitor, minio, ingress-nginx) after actually reading each
+  component's real manifest, not going from memory - cert-manager/reaper/snapshot-job are
+  CronJob/Job-spawned, not always-on, and were wrongly included before. Restart button added,
+  gated on a real crash-signal check (`CrashLoopBackOff`/`ImagePullBackOff`/etc.), not merely
+  "not Running" (which flickered during completely normal Setup startup).
+- **CORS added to Cloud, then corrected** after the user caught the first version was wildcard
+  (`allow_origins="*"`, applying to the *entire app*, not just the one route that needed it) -
+  now scoped to the one real browser origin (`http://browseterm.local.com`, derived from
+  `BROWSETERM_LOCAL_CALLBACK_URL`, not invented). This existed because P10 (an earlier session)
+  had the browser connect directly to Cloud's SSE stream, and nobody revisited Cloud's own
+  "CORS deliberately not added" decision from P07 when that shipped.
+
+### Real bugs found and fixed (each one live-verified against the running pods/database, not just
+### "should work now")
+1. **`browseterm-server` (Local's actual Deployment name) was CrashLoopBackOff** -
+   `psycopg2.OperationalError` connecting to a placeholder `"unused"` Postgres host. Root cause:
+   the deployed image predated a real commit (`4fefb08`, P10) that removed the code needing
+   Postgres at all - `local_stack.py`'s placeholder values were correct for current source, wrong
+   for the stale image actually running. Fixed by rebuilding from current source.
+2. **Same exact bug class, three more times**: `status_monitor` (predated `d13c48e` P09),
+   `container-maker` (predated `229c044`), `socket-ssh` (predated `7a357bf` P11) were ALL running
+   images built before their own respective "migrate off direct Postgres/Redis access onto
+   Cloud's API" commits. Each rebuilt from current source and redeployed.
+3. **Every local-stack component that calls Cloud's API was also missing `hostAliases`** (only
+   `browseterm-server-local`'s manifest had it). On this single-Mac two-cluster dev setup,
+   `browseterm.cloud.com` resolves inside `browseterm-k3s-local`'s own pods to whatever the Mac's
+   own `/etc/hosts` maps it to (127.0.0.1, for the developer's browser) - not the real Cloud
+   cluster - so every such call got "Connection refused" against its own loopback. Fixed for
+   `status_monitor`/`reaper` (sourced-env.mk deploy path) and `container-maker`/`socket-ssh`
+   (positional-arg deploy scripts, needed threading `CLOUD_INGRESS_HOST`/`_IP` through their own
+   Makefiles+scripts+manifests, not just a live patch).
+4. **`/etc/hosts`'s `socketssh.local` entry has been pointing at `192.168.252.200`** - a real IP,
+   but from the *original* Multipass-VM-based k3s cluster this project used months before the
+   current k3d-based one - **this whole session**, unrelated to any of the fixes above. This is
+   why "SSH connect hangs": confirmed via socket-ssh's own logs that **zero** connection attempts
+   ever reached the pod, even after fix #2/#3 above. Not auto-fixed (needs `sudo`) - the user was
+   given the exact command and is expected to have run it, but this has **not been confirmed
+   working from their side yet** - see "What's NOT yet confirmed" below.
+5. **CORS was never configured on Cloud at all**, and P10 (an earlier session) made the browser
+   call Cloud's SSE endpoint directly without anyone revisiting that. This is why a terminal's
+   status appeared stuck on "Pending" in the UI even though the database and every backend service
+   had already correctly moved it to "Running" in 1-3 seconds - confirmed by querying Postgres
+   directly. Fixed (see above), then corrected again after the user caught the first fix being
+   wildcard-scoped.
+6. **The create-terminal +/- buttons stopped working** - a real regression from this session's own
+   earlier subscription->quota rewrite (three separate leftover references to deleted
+   `this.cpuConfigurable`-style fields, one of which silently hardcoded the actually-submitted
+   CPU/Memory/Storage values back to 1/1/2 regardless of what the UI showed). Found via grep on
+   the freshly-deployed pod's own files, not assumption. Fixed.
+7. **The "Welcome to BrowseTerm!" login notification wasn't showing.** Not fully "removed" as the
+   user suspected - P07 (earlier session) legitimately deleted the whole intermediate page the old
+   "Logging in via Google..." message ran on, since that page can't exist in the new
+   Cloud-owns-OAuth architecture. But the backend's own `auth_result=success` redirect param was
+   already correct and simply never read by anything - `home.html` (confirmed the ACTUAL page
+   users see; `home.js` is dead code only loaded by an internal test harness) now reads it.
+8. **`local_stack.check_prerequisites()`'s own `/etc/hosts` check was too weak** to have ever
+   caught bug #4 - it only checked whether the hostname string appeared anywhere in the file, not
+   that it actually pointed at `127.0.0.1`. Replaced with a check that parses real lines and
+   requires the first column to be `127.0.0.1` for that hostname.
+
+### What's NOT yet confirmed (the actual next step for whoever picks this up)
+The user was given this exact command to run (needs `sudo`, this app must never run it
+unprompted):
+```
+sudo sed -i '' 's/^192.168.252.200  socketssh.local/127.0.0.1\tsocketssh.local/' /etc/hosts
+```
+...and a 6-step test plan (run the command -> verify with `grep socketssh.local /etc/hosts` ->
+fully close/reopen the browser tab, not just reload -> create a terminal, watch the quota display
+-> confirm it goes Pending->Running LIVE without a manual refresh (tests the CORS fix) -> click
+Play/Connect and confirm SSH actually connects (tests the `/etc/hosts` fix). **As of this entry,
+there is no confirmation from the user that they ran the command or that either fix actually
+worked end-to-end from their side.** If a new session starts and this hasn't been mentioned yet,
+that's the first thing to ask about - don't assume either fix is confirmed working just because
+the code/live-pod verification above was thorough for the SERVER side of each bug.
+
+### Uncommitted changes, by repo (nothing committed all session - `git status --short` as of this
+### entry)
+- **browseterm-server** (Cloud): `app.py`, `infra/cloud/cloud.yaml`, `scripts/cloud/cloud-setup.sh`,
+  `src/authentication/provider_oauth_service.py`, `src/cloud/device_handlers.py`,
+  `src/cloud/oauth_handlers.py`, `src/common/config.py`, 3 test files.
+- **browseterm-server-local**: `app.py`, `src/api_handlers.py`, `src/cloud_client/client.py`,
+  `src/containers/containers_helpers.py`, `src/containers/containers_service.py`,
+  `src/template_handlers.py`, `templates/{base,home,profile,terminals}.html`,
+  `templates/static/css/terminals.css`, `templates/static/js/{profile,terminals}.js`, new
+  `tests/integration/containers/test_device_quota.py`.
+- **browseterm-desktop**: `README.md`, `main.py`, most of `desktop/*.py` except `local_stack.py`/
+  `cluster_manager.py` which are new+untracked (pre-existing from before this session, per the
+  entries below), `desktop/web/*`, `tests/test_desktop.py`, new `tests/{test_api_cluster,
+  test_cluster_manager,test_config,test_local_stack}.py`; `desktop/loopback_server.py` and
+  `tests/test_loopback_server.py` deleted.
+- **container-maker**: `infra/k8s/deployment/deployment.yaml`,
+  `scripts/k8s/deployment/k8s-development-setup.sh` (hostAliases plumbing).
+- **socket-ssh**: `Makefile`, `infra/deployment/deployment.yaml`, `scripts/deployment/setup.sh`
+  (hostAliases plumbing).
+- **browseterm_workload**: `reaper/infra/deployment/deployment.yaml`,
+  `status_monitor/infra/deployment/deployment.yaml` (hostAliases). Also shows modified `.pyc`
+  cache files under `status_monitor/` - harmless bytecode artifacts, not real changes, safe to
+  ignore (arguably worth a `.gitignore` entry at some point, not done here).
+- **browseterm-monorepo**: `env.mk.example`, `scripts/gen-env.sh` (the `SERVER_GOOGLE_DEVICE_*`
+  fan-out from earlier in this session), this file.
+
+### Test status as of this entry
+Cloud 193/193. Local 125/125 (2 pre-existing, documented-elsewhere collection failures excluded).
+Desktop 92/92. All live-verified against the actual running pods/database at each step, not just
+green test suites in isolation.
+
+## Where things stand (as of 2026-09-10, truly the final entry — user immediately caught that the CORS fix above was itself sloppy: wildcard origin on the whole app, not scoped to the one real caller. Fixed properly.)
+**User: "Ohh no this is a security flaw. We are not supposed to do this. How do we fix this?"**
+- reacting to the `allow_origins="*"` default just shipped. Right call, and worth being precise
+about exactly what was wrong rather than just swapping in a fix: `CORSMiddleware` applies to the
+**entire app** once added via `app.add_middleware` - there's no built-in per-route scoping in
+Starlette - so the wildcard didn't just open `/events/stream`, it opened every endpoint on Cloud
+to being read by JavaScript on any origin on the internet. `allow_credentials=False` genuinely
+does prevent the classic *credentialed*-wildcard-CORS account-takeover pattern (p07.md section 58
+- no ambient cookie can ride along), but that's not the only exposure: the SSE token is carried in
+a URL query string, which is exactly the kind of value that leaks into `Referer` headers, access
+logs, and browser history - a wildcard origin means any page that ever got hold of a leaked token
+(through no fault of Cloud's own request handling) could read the stream from anywhere, not just
+from `browseterm.local.com`.
+
+**Fixed by scoping to the one real caller instead of removing CORS entirely** (removing it would
+just reintroduce the original stuck-Pending bug) - `BROWSETERM_CORS_ALLOWED_ORIGINS` now defaults
+to an origin **derived from `BROWSETERM_LOCAL_CALLBACK_URL`** (`http://browseterm.local.com`, the
+one origin this project already treats as trusted/known, not a new value invented for this) rather
+than `"*"`, still overridable via env var for a real multi-origin deployment. Also dropped
+`allow_headers=["*"]` down to `CORSMiddleware`'s own default (the CORS-safelisted header set) -
+`EventSource` sends no custom headers at all, so there was nothing that ever needed the wildcard
+there either; tightened everything to exactly what's actually used, not what happened to be
+convenient to write. **Live-verified the fix actually closes the hole, not just that the code
+looks right**: `curl` with `Origin: http://browseterm.local.com` gets back
+`access-control-allow-origin: http://browseterm.local.com` (echoed, not `*`); the identical
+request with `Origin: http://evil.example.com` gets **no CORS header back at all** - a browser
+correctly refuses to let that page's JS read the response. New
+`TestCorsAllowedOriginsIsNeverWildcardByDefault` (2 tests: default is the derived Local origin and
+explicitly asserts `'*' not in` the list; an explicit override is still respected) specifically so
+this exact mistake can't silently land again in a future session without a test failing. 193/193
+Cloud tests passing (was 191, +2). Rebuilt and redeployed `zim95/browseterm-server-cloud:latest`
+once more.
+
+**Not done this session**: the user has not yet re-tested end to end after the `/etc/hosts` fix
+(needs their own `sudo` action) and this CORS correction together; the GitHub OAuth App's Device
+Flow toggle; nothing committed to git.
+
+## Where things stand (as of 2026-09-10, continued the final time this session — the REAL remaining causes of "stuck Pending" and "SSH hangs": Cloud has never had CORS, which broke silently the day P10 made the browser call it directly; and /etc/hosts's socketssh.local entry has been pointing at a dead Multipass-VM IP this whole session, unrelated to anything fixed today)
+**User, after the previous round of fixes: "the ssh terminal is still stuck. And new terminals
+are still stuck on pending."** Did not assume the earlier fixes were incomplete - checked the
+actual live state first. `psql` directly against Cloud's Postgres showed **both** of this
+session's test containers already sitting at `status = RUNNING`, updated within 1-3 seconds of
+creation each time, container-maker/status_monitor logs showed the full Pending->Running pipeline
+completing cleanly and instantly. **The backend has been correct this whole time** - both
+remaining symptoms turned out to be two completely separate, real, previously-undiscovered bugs
+on the client side.
+
+**Root cause #1 - "stuck Pending" in the UI**: `terminals.js`/`terminalpage.js`'s `EventSource`
+connects **directly from the browser** to Cloud's `GET /events/stream`
+(`http://browseterm.cloud.com:9999`) for live status pushes - a genuine cross-origin request from
+`browseterm.local.com`. Checked `p.md`'s own explicit, dated CORS decision: **"CORS: deliberately
+not added... audited whether any browser JavaScript needs to call Cloud directly - it doesn't"**
+- true when P07 was written. P10 (added later, per this file's own earlier entries) introduced
+exactly the direct-browser-to-Cloud call that audit said didn't exist, and nobody revisited the
+CORS decision when P10 shipped. Without `Access-Control-Allow-Origin`, the browser silently
+refuses to deliver the SSE payload to the page's JS - `loadTerminals()`'s own initial fetch (a
+plain same-origin-relayed call through Local, not through this broken path) is the only thing
+that ever showed the real status, so only a manual page reload ever worked, never the live push.
+Fixed: new `CORSMiddleware` on Cloud (`app.py`), a new `BROWSETERM_CORS_ALLOWED_ORIGINS` config
+(same dev-permissive `"*"` convention as `BROWSETERM_ALLOWED_HOSTS`) - `allow_credentials=False`
+is deliberate and load-bearing, not just a default, since `/events/stream` authenticates via a
+query-string token, never a cookie, which is exactly what makes a wildcard origin safe here
+(p07.md section 58 warns against *credentialed* wildcard CORS specifically, not wildcard alone).
+191/191 Cloud tests still passing; rebuilt and redeployed `zim95/browseterm-server-cloud:latest`.
+
+**Root cause #2 - "SSH connect hangs"**: checked `/etc/hosts` directly rather than assuming this
+session's container-maker/socket-ssh fixes were insufficient - `socketssh.local` has been mapped
+to `192.168.252.200` this **entire session**, a real but completely unrelated leftover from the
+original Multipass-VM-based k3s cluster this project used months ago (that IP was the old
+MetalLB pool address, documented in this file's very first entries) - `browseterm.local.com`
+already correctly points at `127.0.0.1` (the current k3d cluster's port-mapped ingress), but
+`socketssh.local` was never updated to match. Confirmed via socket-ssh's own logs: **zero**
+connection attempts had ever reached the pod, even after this session's stale-image/hostAliases
+fixes - the browser's WebSocket was dialing a dead address before ever reaching this project's
+current cluster at all, so those earlier fixes were real and necessary but could never have been
+sufficient on their own. Not fixed automatically - editing `/etc/hosts` needs `sudo`, so the user
+was given the exact `sed` command to run themselves.
+
+**Also hardened `local_stack.check_prerequisites()` against this exact bug class recurring
+silently**: `_etc_hosts_has()` only checked whether the hostname string appeared anywhere in the
+file at all - a stale entry pointing at the wrong IP entirely satisfied that check just as well as
+a correct one, which is exactly how root cause #2 went unnoticed for so long. Replaced with
+`_etc_hosts_maps_to_loopback()`, which parses each real (non-comment) line and requires the first
+column to actually be `127.0.0.1` for that hostname - a commented-out line or a line pointing
+anywhere else now correctly fails the check. Updated the error message accordingly: it no longer
+suggests a blind `>> append` (which would never fix a wrong *existing* line - /etc/hosts resolves
+top-down, so a correct line appended below a wrong one still loses to it, a bug class this project
+has hit and documented before), instead giving a `sed`-based in-place fix per hostname. 4 new/
+changed tests (`test_etc_hosts_maps_to_loopback_rejects_wrong_or_commented_entries` (parametrized:
+wrong IP, commented out), `..._accepts_a_real_loopback_entry`) - captured the real function
+before the file's autouse fixture monkeypatches it for every other test, since these two need the
+genuine implementation. 92/92 desktop tests passing (was 89, +3 net after the rename).
+
+**Not done this session**: the user has not yet re-tested after the CORS fix + `/etc/hosts` fix
+(the latter needs their own `sudo` action first); the GitHub OAuth App's Device Flow toggle;
+nothing committed to git.
+
+## Where things stand (as of 2026-09-10, continued once more yet again — container-maker and socket-ssh were BOTH on stale, pre-migration images with the same missing-hostAliases gap as status_monitor/reaper; this is what "SSH connect hangs" and part of the pending-container noise actually was. Quota is now shown per-resource ("/ N cores"/"/ N GiB"), fields are typable, and a final quota check runs at Create time too.)
+**User: "container stays pending" + "when we hit play, the ssh page hangs, connect does not
+work."** Investigated both from live pod state and logs rather than guessing. `container-maker`'s
+`save_reconciler` was still failing with the exact same `psycopg2.OperationalError: could not
+translate host name "None"` signature as every other stale-image bug this session -
+`git log --oneline` confirmed the checked-out source is already past `229c044 Migrate off direct
+Postgres access onto Cloud's internal container API`, so this was the deployed image predating
+that commit, not a source bug (4th occurrence of this exact bug class this session, after
+browseterm-server-local, status_monitor, and now this). Separately, `socket-ssh` was logging
+`[ioredis] Unhandled error event: ECONNREFUSED` on every request - grepping its actual current
+source (not just `src/`, the whole repo) turned up **zero** ioredis/Redis references anywhere,
+and `git log` showed HEAD is past `7a357bf P11: remove direct Redis access - consume ws_tokens
+via Cloud's API instead`. Same bug, 5th occurrence. This fully explains the SSH connect hang:
+socket-ssh's current code needs `BROWSETERM_CLOUD_API_URL` to validate a one-time ws_token before
+a connection can proceed, so **it would have needed the hostAliases fix too even if it hadn't
+also been on a stale image** - container-maker and socket-ssh were the two components flagged
+three entries ago as "confirmed to have the same missing-hostAliases gap, not fixed yet since
+they use `make prod_setup`'s positional-arg scripts instead of a sourced env.mk" - that follow-up
+was overdue and this is what surfaced it.
+
+**Fixed both properly this time**, not just live-patched: added `CLOUD_INGRESS_HOST`/
+`CLOUD_INGRESS_HOST_IP` as new trailing optional positional args to both components' own
+`deployment-setup.sh`-style scripts (`container-maker/scripts/k8s/deployment/
+k8s-development-setup.sh`, `socket-ssh/scripts/deployment/setup.sh`) and their Makefiles'
+`prod_setup` targets, added the identical `hostAliases` block to both manifests, and threaded
+`cloud_ingress_host_ip` through `desktop/local_stack.py`'s `_deploy_container_maker`/
+`_deploy_socket_ssh` (already resolved once per `deploy()` run, just never passed to these two
+specifically before). Rebuilt both images from current source (`zim95/container-maker:latest`,
+`zim95/socket-ssh:latest` - both `IfNotPresent`, so a plain `k3d image import` sufficed, no
+registry push needed this time) and patched the live Deployments' `hostAliases` directly (a
+strategic merge patch only touches the field specified - confirmed container-maker's earlier
+`USER_POD_RUNTIME_CLASS` gvisor-strip patch survived untouched). Verified against the fresh pods
+by exact pod name (not the `-l app=` label selector, which briefly mixed in the old pod's own
+tail output during rollout and looked like the fix hadn't taken - a real false alarm worth
+remembering): container-maker now gets a clean `200 OK` from `/internal/containers/stuck-saves`
+on startup, socket-ssh's new pod logs show nothing but a clean "WS server listening" with zero
+ioredis lines.
+
+**Also finished the create-terminal form polish, per explicit ask**: each CPU/Memory/Storage
+control now shows "/ N <unit>" next to the +/- buttons (`cpuQuota`/`memoryQuota`/`storageQuota`
+spans, updated live in `configureResourceControl`) - cores for CPU, **GiB for storage** (the user
+guessed MiB; corrected to GiB since `storage_limit` is already submitted with a `Gi` suffix
+alongside memory, so GiB is what's actually consistent with what gets requested, not an arbitrary
+choice). Removed `readonly` from all three inputs so typing a number directly now works, same as
+the +/- buttons. `handleFormSubmit` now runs one more `isWithinDeviceQuota` check (a new shared
+helper, also used by `updateSubmitButtonState`) immediately before ever calling the backend and
+shows a "Not Enough Quota" notification if it fails - Cloud's own `create_container` reservation
+check remains the real, final authority regardless.
+
+Full desktop suite 89/89 (call-order test tolerated the new `cloud_ingress_host_ip` arg to
+`_deploy_container_maker`/`_deploy_socket_ssh` without needing changes - it already used a
+generic `lambda *a` for those two). Local suite 125/125 unchanged (no test coverage for the
+mechanically-generated deploy scripts or the manifest hostAliases blocks - covered by the live
+verification above instead). Rebuilt and redeployed `zim95/browseterm-server:latest` once more
+for the terminals.html/js/css changes.
+
+## Where things stand (as of 2026-09-10, continued once more again — +/- buttons fixed (a real regression from the previous quota-UI pass), Create Terminal button now live-validates against device quota, quota refreshes after each create instead of going stale)
+**User: "the increment/decrement buttons are not working... they don't update the UI."** Root
+cause: a genuine regression from this session's own earlier subscription->device-quota rewrite of
+`terminals.js`. Three separate leftover references to the deleted `this.cpuConfigurable`/
+`memoryConfigurable`/`storageConfigurable` fields survived the rewrite, each silently `undefined`
+(always falsy) now:
+1. `setupNumberInputs()` gated attaching the +/- click listeners on `this.cpuConfigurable` etc. -
+   since that's now always falsy, **the listeners were never attached at all**, so the buttons
+   were inert regardless of `disabled` state.
+2. `TerminalsUtilities.adjustNumber(input, change, min=1, max=30)` had a hardcoded default
+   `max=30` never actually overridden by any call site - even after fixing #1, +/- would have
+   ignored the real per-device max set on the input's own `.max` attribute.
+3. **The worst one, found last**: `handleFormSubmit`'s actual submitted values -
+   `const cpuValue = this.cpuConfigurable ? parseInt(formData.get('cpu')) : 1` (and the memory/
+   storage equivalents) - meant that even with a working slider showing the right number, **the
+   value actually sent to Cloud on submit was hardcoded back to 1/1/2 regardless of what the user
+   picked**. Found by grepping the freshly-deployed pod's own file for `cpuConfigurable` after the
+   first "fix" and redeploy - it still had 1 match, which is what surfaced this.
+
+Fixed all three: listeners now always attach (a `disabled` button/input already correctly
+suppresses interaction - no need to gate whether a handler exists at all); `adjustNumber` now
+reads `min`/`max` straight from the input element's own current attributes (kept in sync by
+`configureResourceControl`) and dispatches a synthetic `input` event after changing the value
+(needed since setting `.value` programmatically doesn't fire one on its own); the three submitted
+values are now always read straight from the form, unconditionally.
+
+**Also implemented, per explicit ask, not just the bug fix**: "Create button will only be enabled
+when the user's CPU, Memory, and Storage are within the remaining limits." New
+`updateSubmitButtonState()` checks all three inputs against their own live min/max on every
+`input` event (typing or +/- both fire it now) and disables Create Terminal if any is out of
+bounds - Cloud's own reservation check in `create_container` remains the real, authoritative
+enforcement regardless of what the button shows. **Also closed the "known gap" flagged two
+entries ago**: device quota was only ever fetched once at initial page load, so creating one
+terminal wouldn't reduce what the form showed as available next time without a full page reload.
+New `GET /device-quota` (`src/api_handlers.py:get_device_quota`, session-authenticated, thin
+proxy to the same `CloudClient.get_active_device` call `template_handlers.py:terminals` already
+used at render time) lets the browser re-check without reloading - called both when the
+create-terminal modal opens and immediately after a terminal is successfully created (the same
+moment Cloud actually reserved that usage against the device). 2 new tests
+(`test_device_quota.py`). 125/125 passing (was 123, +2). Rebuilt and redeployed
+`zim95/browseterm-server:latest` twice this pass (once for the button/listener fix, once more
+after finding the submitted-value bug) - confirmed via `kubectl exec ... grep` on the live pod
+that zero `*Configurable` references remain before calling it done.
+
+## Where things stand (as of 2026-09-10, continued once more — terminal creation is now gated by device quota, not subscription; the real quota-enforcement mechanism turned out to already exist in Cloud, just shadowed by a Local-side subscription check)
+**"Creating terminals should no longer be limited by the subscription - it should be based on the
+remaining quota of the device/node, deducted per pod."** Investigated before writing anything:
+Cloud's `POST /containers` (`browseterm-server/src/cloud/container_handlers.py::create_container`)
+**already does exactly this** - a real, already-built P12/P13 feature this session didn't know
+about until reading the handler - it validates requested cpu/memory/storage against the target
+device's `available = allocated - used` capacity, reserves usage against the device BEFORE
+creating the container row, and releases the reservation if the row-create then fails. `device_id`
+can even be omitted (P13): Cloud auto-resolves the caller's currently-`ACTIVE` device, the same
+"at most one ACTIVE device per user" invariant `_demote_other_devices` already enforces elsewhere.
+None of that needed to change.
+
+**The actual blocker was one layer up, in Local**, which called this already-correct Cloud
+endpoint but gated reaching it on a *separate*, purely subscription-based check first:
+`containers_service.py::create_container_in_db` called `is_user_within_container_limit(user_id)`
+- a `max_containers` count check against the user's subscription tier, unrelated to actual
+resource availability - and raised before Cloud's own device-quota logic ever ran. Removed that
+call entirely (not commented - this one is being replaced by a better mechanism, not temporarily
+hidden) and deleted `is_user_within_container_limit` itself along with its now-dead imports
+(`get_user_current_subscription_plan`, `GetUserSubscriptionPlanModel`, `list_user_containers`,
+a stray pre-existing `from ast import Dict` that had nothing to do with `ast` at all) - confirmed
+via grep it had exactly one caller anywhere in the repo before deleting.
+
+**The create-terminal form's CPU/Memory/Storage inputs had the identical problem one level up
+in the UI**: `terminals.js` disabled/enabled each control based on whether the user's subscription
+tier had that resource marked `"configurable"` (an all-or-nothing per-tier feature flag, not a
+numeric bound - the actual HTML `max` was a flat, meaningless `30` regardless of plan or device).
+Replaced with real device-quota bounds: reused the `GET /internal/users/{user_id}/active-device`
+endpoint built earlier this session (originally for Profile's "Current Device") - Local's
+`template_handlers.py::terminals` now fetches the active device and passes its
+`available_cpu`/`available_memory_bytes`/`available_storage_bytes` down; `terminals.js` sets each
+input's `max` to the real remaining quota (bytes converted to whole GB, floored so the UI can
+never suggest more than Cloud would actually accept) and enables all three controls unconditionally
+- no more subscription-tier gating on whether they're even touchable. Below the minimum (e.g. no
+device, or quota already exhausted), the control disables with "Not enough device quota remaining"
+instead of the old "Only available to X subscription" messaging. Cloud's own reservation logic
+remains the real enforcement regardless of what the UI shows - this only makes the shown bound
+truthful. **Known, deliberately-accepted gap**: the quota shown is fetched once at page load, not
+re-fetched when the create-terminal modal opens - creating one terminal then immediately opening
+the modal again in the same page session could show a briefly-stale (too-high) max; Cloud's
+real-time check still catches it safely either way, just as a rejected create instead of a
+pre-disabled control. Left as a known follow-up rather than adding a new live-refresh endpoint
+under an already very large session.
+
+Full suite still 123/123 (no test ever covered `is_user_within_container_limit` - confirmed by
+grep before and after, zero references anywhere once removed). Rebuilt and redeployed
+`zim95/browseterm-server:latest` live to `browseterm-k3s-local` (same build+import+restart
+pattern used all session).
+
+**Not done this session**: refreshing device quota when the create-terminal modal opens (see
+above); container-maker/socket-ssh's own missing hostAliases (flagged earlier this session, still
+outstanding); the GitHub OAuth App's Device Flow toggle; a real human login+Setup+Teardown
+click-through; nothing committed to git.
+
+## Where things stand (as of 2026-09-10, continued yet again — welcome notification restored, real "stuck in Pending forever" root-caused and fixed (status_monitor stale image + missing Cloud hostAliases), subscriptions commented out, Profile shows Current Device)
+**"Why aren't login notifications showing up, did we remove them?"** - checked git history rather
+than guessing: P07 (`d7731fa`) genuinely DID delete two real notification call sites
+(`oauth_callback.js`'s whole 182-line file, entirely removed) as a **necessary** side effect of
+Cloud becoming the sole OAuth authority - the intermediate page they ran on literally cannot exist
+in the new architecture (Local's `/auth/callback` is now an invisible server-to-server redeem +
+redirect, no client-rendered page in between for a "Logging in via Google..." message to run on
+at all). But the **"Welcome to BrowseTerm!" success notification specifically was recoverable**:
+`api_handlers.py`'s `auth_callback` already redirects a successful login to `/?auth_result=success`
+- that query param was just never read by anything. `home.html` (the actual production page -
+confirmed `home.js` is dead code, only ever loaded by the internal `js_test.html` harness, never
+the real page) now checks for it on load and fires `window.notifications.success(...)`, then
+strips the param via `history.replaceState` so a refresh doesn't re-show it. "Logging in via
+Google..." itself is honestly not recoverable in the old form - flagged to the user why, not
+silently dropped.
+
+**Added an "Open in Browser" button next to Teardown** (`desktop/api.py:Api.open_browser`,
+`webbrowser.open` against `local_stack.INGRESS_HOST` - reused rather than reintroducing the
+`BROWSETERM_LOCAL_URL` config constant removed earlier this session), shown only when
+`cluster_exists`.
+
+**"Terminal creation stuck in Pending forever" - fully root-caused and fixed, three real bugs
+deep:**
+1. The pod itself was never actually the problem - `container-maker` logs showed it reaching
+   `Running` in ~25s, completely normally.
+2. `status_monitor` (which watches pod phase changes and reports them to Cloud) was running a
+   **stale image** - `git log` showed the current source is 2 commits past `d13c48e P09: migrate
+   status_monitor off direct Postgres access onto Cloud's internal status API`, but the deployed
+   image was still crashing with `psycopg2.OperationalError: could not translate host name
+   "None"` - the exact same stale-image bug class as the `browseterm-server` crash found earlier
+   this session, just in a different component. Rebuilt from current source and **pushed to Docker
+   Hub for real** (`zim95/status-monitor:latest`, this manifest uses `imagePullPolicy: Always`
+   unlike browseterm-server's `IfNotPresent`, so a local `k3d image import` alone wouldn't have
+   stuck - a registry push was actually required this time).
+3. Fixing #2 surfaced a **second, previously-invisible bug**: with the stale-image crash out of
+   the way, status_monitor could finally reach its own "report to Cloud" step - which then failed
+   with "Connection refused". Root cause: on this single-Mac two-cluster dev setup,
+   `BROWSETERM_CLOUD_API_URL`'s hostname (`browseterm.cloud.com`) resolves inside
+   `browseterm-k3s-local`'s own pods to whatever the **Mac's own `/etc/hosts`** maps it to
+   (`127.0.0.1`, for the developer's browser) - Docker Desktop's DNS forwarding inherits the host's
+   own hosts file. Connecting to `127.0.0.1:9999` from *inside a pod* means that pod's own
+   loopback, not the Mac's - nothing listens there. `browseterm-server-local`'s own manifest
+   already has a `hostAliases` override for exactly this (SETUP-LOCAL.md's own documented fix,
+   using `host.docker.internal`'s real IP), but confirmed by grep that **status_monitor, reaper,
+   container-maker, and socket-ssh manifests all lack it** - browseterm-server-local's own
+   `_deploy_browseterm_server_local` was the only local_stack.py deploy step ever wired to receive
+   `cloud_ingress_host_ip`. Added the identical `hostAliases` block to status_monitor's and
+   reaper's manifests (the two "sourced env.mk" deploys, cheap to fix) and threaded
+   `cloud_ingress_host_ip` through both `_deploy_status_monitor`/`_deploy_reaper` in
+   `local_stack.py`. **container-maker and socket-ssh have the identical gap, confirmed, not fixed
+   this session** - they use `make prod_setup`'s positional-arg deployment-setup.sh scripts
+   instead of a sourced env.mk, a bigger multi-file change (manifest + Makefile + script per repo)
+   deliberately left as a flagged follow-up rather than done blind under an already-large turn.
+   **Live-verified the actual fix, not just the code**: patched the live secret/manifest,
+   restarted, watched status_monitor's own logs go from `Connection refused` to real `200 OK`
+   responses against Cloud, ending in `"updated container status" ... status: "Running"` for the
+   exact container that had been stuck - the literal bug report, fixed and confirmed end-to-end,
+   not just "should work now."
+
+**Subscriptions commented out, per explicit "we don't need subscriptions for now"**: the
+`/subscriptions` nav link (`base.html`, Jinja `{# #}` comment) and its route registration
+(`app.py`, following the exact same commenting convention `create-payment` already used one line
+below it) - backend quota/plan-gating logic (`resume_container`, etc.) deliberately untouched,
+this only hides the UI entry points. `/payment` is already normally unreachable without a plan
+selection from `/subscriptions` first, so no separate change needed there.
+
+**Profile page: "Current Plan" replaced with "Current Device", per explicit request.** This needed
+a genuinely new capability, not just a template edit: Local holds no device Bearer token (that
+credential belongs to Desktop alone, p07.md section 16), so it had no way to ask Cloud "which
+device is this user's active one." New Cloud endpoint `GET /internal/users/{user_id}/active-device`
+(`device_handlers.py`, same internal-token-gated trusted-SYSTEM-caller pattern as every other
+`/internal/*` route, queries `DeviceOps.find_one({"user_id": ..., "status": DeviceStatus.ACTIVE})`
+- "active" is exactly the existing "at most one ACTIVE device per user" invariant
+`_demote_other_devices` already enforces elsewhere, so there's never an ambiguous answer). New
+`CloudClient.get_active_device(user_id)` in Local; `template_handlers.py:profile` now fetches it
+(fails open to `None` on any Cloud error, matching the project's own established convention) and
+passes it to `profile.html`/`profile.js` (renamed `currentPlan`->`currentDevice` throughout,
+shows `device_name` or "No active device"). 3 new Cloud tests
+(`TestGetActiveDeviceInternal`). Both Cloud (191/191) and Local (123/123, 2 pre-existing unrelated
+collection failures excluded per the P07 commit's own documented convention) test suites green.
+
+**All of the above rebuilt and redeployed live**: `zim95/browseterm-server-cloud:latest` (new
+endpoint) and `zim95/browseterm-server:latest` (welcome notification, subscriptions, profile) via
+the same `docker build` + `k3d image import` + restart pattern used all session;
+`zim95/status-monitor:latest` via a real Docker Hub push (see above, `imagePullPolicy: Always`
+required it). All three confirmed `1/1 Running` post-redeploy.
+
+**Not done this session**: container-maker/socket-ssh's own missing hostAliases (flagged, not
+fixed - see above); the GitHub OAuth App's Device Flow toggle; a real human login+Setup+Teardown
+click-through; nothing committed to git.
+
+## Where things stand (as of 2026-09-10, continued yet again — a bigger real gap found: Setup never installed ingress-nginx at all, so browseterm.local.com was completely unreachable)
+**User asked to open `browseterm.local.com` and it 404'd outright** ("404 page not found", the
+exact plain-text Go `net/http` default handler string) - not the app returning a 404, something
+in front of it was. Root-caused by checking, not guessing: `kubectl get pods -n ingress-nginx`
+on `browseterm-k3s-local` returned **"No resources found"** - `local_stack.py`'s `deploy()` never
+installed ingress-nginx at all, on any Setup run, ever. Confirmed by grep: zero mentions of
+"ingress-nginx" anywhere in `local_stack.py` outside of a hostname string. Meanwhile
+`kube-system` had a live `traefik` helmchart/pod/svclb - k3s's own bundled default, which
+`cluster_manager.create_cluster()` never disables at cluster-creation time - squatting on host
+port 80 and answering with its own default-backend 404 for every request, Ingress resources
+(`browseterm-server-ingress`, correctly configured, right backend/endpoint) sitting there
+unused. This is exactly the "k3s's bundled Traefik squats on ports 80/443" gotcha
+SETUP-LOCAL.md step 2 already documents and gives the fix for - it had just never been ported
+into `local_stack.py`'s automation, only ever done by hand in earlier sessions against
+now-deleted clusters.
+
+**Fixed live immediately** (`kubectl delete helmchart traefik` + apply the exact ingress-nginx
+manifest URL/version SETUP-LOCAL.md step 2 specifies + wait for its rollout) so
+`browseterm.local.com/login` serves the real login page right now (verified `curl` 200, then
+opened it in the browser). **Fixed in code so this can't recur**: new
+`local_stack._ensure_ingress_nginx()`, called as the very first step of `deploy()` (before even
+`_ensure_namespace()`) - idempotent (checks whether `ingress-nginx-controller` already exists
+first, so a second Setup click against an already-provisioned cluster doesn't redundantly
+re-apply/re-wait), and self-healing for a cluster that already exists from before this fix (no
+Teardown needed - the very next Setup click fixes it, since `deploy()` runs unconditionally
+every time regardless of whether `create_cluster()` actually created anything this time).
+Placed in `local_stack.deploy()` rather than `cluster_manager.create_cluster()` deliberately, for
+exactly that self-healing property - a fix living only in `create_cluster()` would only ever
+protect a cluster created after the fix landed, never one already sitting there broken. Also
+fixed `check_prerequisites()`'s own error message, still stale from before this session's earlier
+CLOUD_INTERNAL_API_TOKEN fix (said "set it as an environment variable" as the only option, when
+the local-file fallback is now the primary mechanism). 4 new tests
+(`test_ensure_ingress_nginx_skips_everything_when_already_installed`/`..._installs_when_missing`,
+plus `test_deploy_calls_every_step_in_dependency_order` updated for the new first step). 88/88
+passing (was 86).
+
+**Not done this session**: same outstanding items as before (GitHub OAuth App's own Device Flow
+toggle, a real human login+Setup+Teardown click-through - the browser is now at least reachable
+for that; verifying the rest of the local-stack pods actually work end to end through the real
+Ingress rather than just being `Running`; nothing committed to git).
+
+## Where things stand (as of 2026-09-10, continued again — real Setup crash found+fixed (stale image), login page now matches the real web login page + copy-code button, restart button no longer flickers during normal startup)
+**Real bug hit live by the user actually clicking Setup, not a hypothetical**: `browseterm-server`
+(the Deployment `browseterm-server-local`'s own manifest creates, on `browseterm-k3s-local`) was
+stuck in `CrashLoopBackOff` - `kubectl logs` showed `psycopg2.OperationalError: could not
+translate host name "unused" to address` inside `status_listener.py`'s `PGListener.connect()`.
+Root-caused by actually reading both sides rather than assuming: `desktop/local_stack.py`'s
+`_deploy_browseterm_server_local`/`_ensure_db_placeholder_secret` deliberately pass placeholder
+`POSTGRES_HOST=unused` etc, with a comment saying these are "never actually used for a real
+Postgres connection in the V2 local-cluster architecture" - **true of the current source**
+(`browseterm-server-local`'s own `app.py` confirms in its own P10 comment: "the old
+status_listener_service... is removed - the browser now connects directly to Cloud's own
+GET /events/stream"), **but false of whatever image was actually deployed**. `git log` on
+`browseterm-server-local` confirmed HEAD is 5 commits past the P10 removal commit
+(`4fefb08`) - the deployed `zim95/browseterm-server:latest` on Docker Hub simply predates it,
+because `local_stack.py`'s Setup flow only ever runs `make prod_setup` (apply manifests), it never
+builds or pushes this component's image itself - nothing in this project's automated Setup path
+was ever responsible for keeping that image current. **Fixed by rebuilding from the real current
+source** (`docker image build -f infra/deployment/Dockerfile.deployment`, confirmed via `git log`
+this checkout has no divergence from `origin/main` first) and `k3d image import`ing it into
+`browseterm-k3s-local` (`IfNotPresent` pull policy picks it up without a registry push, same
+pattern used for Cloud's own image all session) - deleted the crashing pod, its ReplicaSet
+recreated it against the fresh image, confirmed `1/1 Running`, 0 restarts, clean startup logs, real
+`GET /login` traffic served. **Not a Desktop-code bug** - `local_stack.py` itself needed no change,
+this was a stale-artifact problem, the kind that will recur any time `browseterm-server-local`'s
+source moves ahead of what's actually pushed to Docker Hub without a corresponding rebuild+push -
+worth remembering next time Setup fails against a Docker-Hub-pulled image with a stack trace that
+looks like it's calling code the current source doesn't have.
+
+**Login page now visually matches the real web login page**, per explicit ask. Read
+`browseterm-server-local/templates/{login.html,static/css/login.css}` for the actual colors/
+layout/spacing (`#A8FBD3` page background, white card, stacked full-width buttons, `#4285f4`/
+`#24292e` button colors, hover lift+shadow) and matched them exactly in
+`desktop/web/login_start.html` - **except** the icon source: the web page pulls Font Awesome from
+`cdnjs.cloudflare.com`, which this app's login window has no business depending on just to render
+a button, so the Google "G" and GitHub Octocat marks are inlined as SVG instead (both official,
+widely-embedded public brand assets, not proprietary/confidential - no visual difference from the
+web page's plain single-tone icons). `app.py`'s `_show_device_code`/`_show_login_error` updated
+for the restructured `#codeRow` wrapper element.
+
+**Added a copy-to-clipboard button next to the device code**, per explicit ask - a small button
+using `navigator.clipboard.writeText()`, with a brief checkmark-icon confirmation on click. Pure
+front-end addition, no Python-side change needed.
+
+**Restart button: fixed the exact flicker-during-Setup problem the user asked about.** Root cause
+confirmed by checking: `showRestart` was `pod.phase !== 'Running'`, which is true for a
+completely healthy pod still in `Pending`/`ContainerCreating` on its way up during a normal ~30-90s
+Setup run - the button was appearing and disappearing for pods that were never actually broken.
+Replaced with real failure-signal detection: new `cluster_manager._is_crashing(phase, statuses)`
+checks `phase == "Failed"` and each container's `state.waiting.reason` against a real crash-reason
+set (`CrashLoopBackOff`/`ImagePullBackOff`/`ErrImagePull`/`InvalidImageName`/
+`CreateContainerConfigError`/`CreateContainerError`/`RunContainerError`) or
+`state.terminated.reason == "Error"` - a bare `Pending`/`ContainerCreating`/`PodInitializing` pod
+with no such reason present is correctly never flagged. `list_pods()` now returns a `crashing`
+field per pod; `app.js`'s `showRestart` reads it directly instead of re-deriving from phase. 6 new
+tests (`test_is_crashing_false_during_normal_startup`/`test_is_crashing_true_on_real_failure_
+signals`, parametrized) plus the two pre-existing exact-dict-equality `list_pods()` tests updated
+for the new field. 86/86 passing (was 77).
+
+**Not done this session**: same outstanding items as before (GitHub OAuth App's own Device Flow
+toggle, a real human login+Setup+Teardown click-through, nothing committed to git).
+
+## Where things stand (as of 2026-09-10, continued — GitHub device flow added, two-button login UI, pod-monitor audit + restart button, code-style cleanup, CLOUD_INTERNAL_API_TOKEN fix)
+**Code-style pass on this session's own new code, per explicit user ask** ("multiple try/except
+blocks -> one try with multiple excepts", "if/elif chains -> dictionaries"), applied only where it
+doesn't lose real information: `device_auth_poll` (Cloud) is now one try wrapping the whole
+pipeline with ordered `except json.JSONDecodeError`/`ValidationError`/`DeviceRegistrationError`/
+`Exception` clauses (safe specifically because these are genuinely disjoint types - a bare `except
+Exception` used for two *different* narrow purposes, e.g. "bad JSON" vs "process_user_info
+failed", can't be merged without losing which one actually happened, so `json.JSONDecodeError` was
+given its own clause rather than folded into the catch-all). Its four sequential `if error ==
+...` branches became one `_POLL_ERROR_RESPONSES` dict lookup. Desktop's `_run_login_flow` merged
+its two try/excepts (both only ever raise `CloudClientError`, so merging loses nothing) into one
+try/except/finally, and its expired/denied/fallback `if` chain became a `_POLL_TERMINAL_ERROR_
+MESSAGES` dict lookup (the `complete`/`pending` branches stayed as real `if`s - they do
+break/continue, which a dict can't express without contorting into a dict-of-callbacks, judged not
+worth it for two branches). Both suites re-verified green after (188 Cloud, then 75 Desktop after
+the sections below).
+
+**Pod monitor: re-verified against the actual manifests rather than trusting the 2026-09-05
+entry's memory of them, per explicit instruction** ("find out how many pods and jobs need to stay
+running... do not monitor [triggered-only] jobs"). Extracted every `kind:`/`name:` pair from each
+component's real prod manifest (`awk` over `container-maker`/`socket-ssh`/
+`browseterm-server-local`/`browseterm_workload/{status_monitor,cert-manager,reaper,snapshot_job}`/
+minio's manifest) instead of assuming: **cert-manager and reaper are both CronJobs** (not
+Deployments - the 2026-09-05 entry's own inclusion of cert-manager was wrong under this
+"always-on only" rule, corrected here), **snapshot_job has no persistent manifest in prod at all**
+(container-maker spawns it as a one-off Job per save, confirming the 2026-08-30 finding), and
+**minio is a Deployment** (`minio.yaml`) **plus a one-shot `minio-createbucket` Job** that runs
+once at deploy time. Final `MONITORED_WORKLOAD_PREFIXES` (`desktop/cluster_manager.py`):
+container-maker, socket-ssh, browseterm-server (browseterm-server-local's real Deployment name),
+status-monitor, minio, ingress-nginx - cert-manager/reaper/snapshot-job deliberately excluded
+(triggered-only, an "up/down" read means nothing for a pod meant to complete and disappear). New
+`_EXCLUDED_WORKLOAD_PREFIXES = ("minio-createbucket",)` handles the one real collision: minio's
+own pod name and its bucket-creation Job's pod name both start with `"minio-"`, so the prefix
+match alone can't tell them apart. Extracted the combined decision into a new
+`is_monitored_pod(name)` function shared by `list_pods()` and the tests, so test and production
+logic can't drift apart. 4 new/changed tests in `test_cluster_manager.py`.
+
+**Restart button, built this same session** (user's follow-up: audit the list first, "after this
+build it"). Design: since every monitored workload is now a Deployment (no CronJobs left in the
+list), restart is just `kubectl delete pod <name>` - the owning ReplicaSet recreates it
+immediately, no pod -> ReplicaSet -> Deployment ownership lookup needed. New
+`cluster_manager.restart_pod(namespace, name)`, `Api.restart_workload_pod` (returns the same shape
+as `list_cluster_pods` so the UI re-renders from one response), and a per-row "Restart" button in
+the pod table (`app.html`/`app.js`/`app.css`) shown only when a pod's phase isn't `Running`. 4 new
+tests across `test_cluster_manager.py`/`test_api_cluster.py`.
+
+**GitHub device flow, implemented in full** (per explicit instruction: "for now, only google will
+work, setup everything for github as well but it will fail due to wrong credentials"). New
+`GithubDeviceAuthService` (`browseterm-server/src/authentication/provider_oauth_service.py`) -
+same shape as `GoogleDeviceAuthService`, but reuses the *existing* `GITHUB_CLIENT_ID`/`SECRET`
+(GitHub's device flow is a per-app toggle, "Enable Device Flow", not a separate client type the
+way Google's is) and its token endpoint needs no client secret at all (a real simplification over
+Google's flow, confirmed against GitHub's own docs, not an oversight). Registered in
+`DEVICE_FLOW_SERVICES = {"google": ..., "github": ...}`. This will 502 live until the account
+owner turns on "Enable Device Flow" in the GitHub OAuth App's own settings (tracked separately,
+matching the user's "let's fix github later" from the earlier session) - `device_auth_start`
+already turns a provider `start()` failure into a clean 502, so nothing new needed there. Two new
+Cloud tests (`TestDeviceFlowServices`, `test_github_provider_uses_github_service`) plus fixed two
+pre-existing tests that were asserting `"github"` itself was unsupported (now false) and had
+started making a **real, unmocked network call to github.com** as a side effect (caught by
+actually reading the test failure output, not assumed) - switched to a genuinely nonexistent
+`"facebook"` provider instead. Desktop side: `login_start.html` now shows two buttons ("Log in
+with Google" / "Log in with GitHub"); `Api.start_login`/`DesktopApp._handle_start_login`/
+`_run_login_flow` all thread a `provider` argument through end to end to
+`start_device_login`/`poll_device_login`. Fixed several tests whose `on_start_login=lambda: None`
+placeholders would now TypeError (the callback takes an arg now) - only one of them
+(`test_start_login_callback_invoked`) actually exercises the call, so only it needed a real
+assertion change; the rest just needed their lambda's arity fixed. New
+`test_run_login_flow_threads_the_clicked_provider_through` locks in that clicking GitHub actually
+reaches both `start_device_login` and `poll_device_login` with `"github"`, not a hardcoded
+`"google"`. 188 Cloud / 75 Desktop passing.
+
+**Both repos redeployed live** with all of the above: rebuilt `zim95/browseterm-server-cloud:latest`
+from the standalone `~/browseterm/browseterm-server` checkout, `k3d image import`ed into
+`browseterm-k3s`, `kubectl rollout restart`ed (no new env vars needed for GitHub specifically -
+`GITHUB_CLIENT_ID`/`SECRET` already existed on the live Secret from the original P07 setup).
+
+**Fixed the `BROWSETERM_CLOUD_INTERNAL_API_TOKEN is not set` error the user hit clicking Setup.**
+Root cause: this is real, intentional, load-bearing config (`local_stack.check_prerequisites()`
+refuses to deploy the local stack without it, exactly matching SETUP-LOCAL.md step 5's own
+warning that Local's every internal-API call otherwise silently 401s) - not a bug, just a value
+that was never exported into the shell the desktop app gets launched from. Retrieved Cloud's real
+live value (`kubectl get secret browseterm-internal-api-token -n browseterm -o jsonpath=...` on
+`k3d-browseterm-k3s`) and gave it to the user as the exact `export` command to run before
+`python main.py`. Also found and fixed real staleness in `browseterm-desktop`'s own docs while in
+there: `README.md` still fully described the pre-device-grant login flow (WebView loads Local's
+real `/login` page, references a `BROWSETERM_LOCAL_URL` env var that no longer exists anywhere in
+the codebase) and `main.py`'s docstring made the same claim - both rewritten to describe the
+actual device-grant flow and the real env vars (`BROWSETERM_CLOUD_API_URL`,
+`BROWSETERM_CLOUD_INTERNAL_API_TOKEN`) this app now needs.
+
+**User then rejected the export-it-yourself fix outright**: "the app should have this thing baked
+in, I should not be exporting this before running it." Replaced it with a local-file fallback
+instead, same `~/.browseterm` directory `STATE_FILE` already uses (never inside a git repo at all,
+so unlike a repo-local secret there's no `.gitignore` rule that needs to keep being right).
+`desktop/config.py`'s `BROWSETERM_CLOUD_INTERNAL_API_TOKEN` now reads the env var first, falling
+back to `~/.browseterm/cloud_internal_api_token` (0600, mirrors `DesktopState.save()`'s own
+permission convention) via the new `_read_local_cloud_internal_api_token()` - the env var still
+works as a one-off override, but day-to-day nothing needs exporting. Wrote Cloud's real live token
+into that file this session (`kubectl get secret browseterm-internal-api-token -n browseterm -o
+jsonpath=... | base64 -d`, this app never writes the file itself - set up once by hand, same as
+Cloud's own `env.mk` secrets) and verified `poetry run python -c "from desktop.config import
+BROWSETERM_CLOUD_INTERNAL_API_TOKEN"` loads it correctly with the env var deliberately unset. 2
+new tests (`tests/test_config.py`, a file that didn't exist before). README updated again to
+match. 77/77 passing (was 75 - this file plus its 2 tests).
+
+**Not done this session**: the GitHub OAuth App's own "Enable Device Flow" console toggle (account
+owner's to do, same as before); actually clicking through a real login+Setup+Teardown cycle in the
+live Desktop app (still needs a human at a real Google/GitHub consent screen - see the entry
+below). Nothing in either repo was committed to git this session either (same standing
+"only commit when explicitly asked" convention).
+
+## Where things stand (as of 2026-09-10 — OAuth Device Authorization Grant (Google) implemented end-to-end and live-verified; this is Desktop's login flow now, breaking the login/cluster chicken-and-egg)
+**Implemented option 3 from the 2026-09-05 chicken-and-egg entry below**: Desktop login now uses
+the OAuth Device Authorization Grant (RFC 8628) against Google, exactly like `gh auth login`, so
+it never needs `browseterm-server-local` reachable at all. GitHub device flow is explicitly out
+of scope this session (needs its own OAuth-console follow-up - user chose to defer it) - only
+"google" is wired up. Google console setup (a genuinely separate "TVs and Limited Input devices"
+OAuth client, `SERVER_GOOGLE_DEVICE_CLIENT_ID`/`SECRET` in the root `env.mk`) was completed by the
+user in the prior session; this session extracted the downloaded credentials JSON, stored it
+through the normal `env.mk` -> `gen-env.sh` fan-out (adding `GOOGLE_DEVICE_CLIENT_ID`/`SECRET` to
+`browseterm-server/env.mk`'s generation, same as the existing `GOOGLE_CLIENT_ID` convention), and
+deleted the plaintext JSON the user had dropped in the monorepo root (untracked, uncovered by any
+`.gitignore` rule - a real leak risk via a future `git add -A`).
+
+**Cloud (`browseterm-server`)**: new `GoogleDeviceAuthService` (`src/authentication/
+provider_oauth_service.py`) - `start()` calls Google's `/device/code` endpoint with the new
+device-flow client (no secret needed at this step), `poll()` calls the standard token endpoint
+with `grant_type=urn:ietf:params:oauth:grant-type:device_code` and always returns Google's raw
+response (pending/slow_down/expired/denied are normal non-200 responses with an `error` field per
+RFC 8628, not transport failures), `fetch_user_info()` reuses the existing userinfo call/
+transform. Two new handlers in `src/cloud/oauth_handlers.py`: `device_auth_start` (`POST
+/auth/device/start`, public) and `device_auth_poll` (`POST /auth/device/poll`, public but
+possession-gated on a live `device_code`). Deliberately reuses every existing P07 building block
+rather than inventing a parallel path: `process_user_info` (find-or-create user),
+`RegisterDeviceRequest`/`_register_or_activate` (register-or-reactivate device), and
+`DeviceTokenManager.issue_token` (mint the same per-device Bearer token the old bootstrap-redeem
+path minted) - a device logged in this way is indistinguishable from one bootstrapped the old
+way. No `HandoffManager` hop is needed or used: Desktop is already the one polling directly, with
+nothing in between to hand a code to. 12 new tests in `tests/integration/cloud/
+test_oauth_handlers.py` (`TestDeviceAuthStart`/`TestDeviceAuthPoll`), same "mock the boundary"
+convention as the existing tests in that file. Full suite: 186/186 passing.
+
+**Desktop (`browseterm-desktop`)**: `desktop/app.py`'s login flow rewritten - the old
+system-browser-+-loopback-server design (still described in git history/the module's old
+docstring) is fully retired, not kept as a fallback: `desktop/loopback_server.py` and its test
+deleted outright, `BROWSETERM_LOCAL_URL`/`_backend_reachable`/`_connection_error_html` all removed
+from `desktop/app.py` and `desktop/config.py` since login no longer touches Local at all -
+verified nothing else in the app referenced them first. `_resolve_start_kwargs`/`_go_to_login_start`
+simplified accordingly (no more pre-login Local-reachability gate). New `_run_login_flow`: calls
+`cloud_client.start_device_login()`, shows the returned `user_code` in the WebView
+(`login_start.html` gained a `#deviceCode` element) and opens `verification_uri` in the system
+browser, then polls `cloud_client.poll_device_login()` on the provider's own `interval` (bumping
+it by 5s on a `slow_down` response, per RFC 8628 section 3.5) until `status` is `complete`/
+`expired`/`denied`/`error`, or the provider's own `expires_in` elapses. Two new functions in
+`desktop/cloud_client.py` (`start_device_login`/`poll_device_login`) calling Cloud's two new
+routes; `redeem_device_bootstrap` is left in place (Cloud's endpoint still exists) but is no
+longer called by anything in this app outside its own direct tests. `test_full_desktop_login_flow_
+round_trip` in `tests/test_desktop.py` rewritten for the new flow (mocks a pending-then-complete
+poll sequence instead of simulating a loopback HTTP hit). Full suite: 69/69 passing.
+
+**Live-verified against the real Cloud cluster and the real Google API, not just unit tests**:
+patched the live `browseterm-oauth-credentials` Secret in `browseterm-k3s`'s `browseterm`
+namespace with the two new keys (additive `kubectl patch --type=merge`, existing keys
+untouched); added the two new `optional: true` env entries to `infra/cloud/cloud.yaml` (`optional`
+specifically so a not-yet-patched Secret would degrade to device-login 401ing rather than
+crash-looping the pod - see the P20 crash-loop incident this project already hit once from a
+manifest change interacting badly with live state). **Did not run `make setup`/`cloud-setup.sh`
+for this** - the standalone `~/browseterm/browseterm-server` checkout's env.mk (copied over from
+the monorepo submodule checkout's generated one, since the standalone checkout - where all this
+session's code edits were made - had no env.mk at all) is missing
+`SNAPSHOT_REGISTRY_REPO_PREFIX`/`EXPECTED_KUBE_CONTEXT`/`BROWSETERM_LOCAL_CALLBACK_URL`/
+`BROWSETERM_ALLOWED_HOSTS`/`CLOUD_INGRESS_HOST` entirely; running the full envsubst'd `make setup`
+would have blanked those out on the live Deployment - a real regression risk, avoided by using a
+targeted `kubectl set env deployment/browseterm-server-cloud --from=secret/
+browseterm-oauth-credentials --keys=GOOGLE_DEVICE_CLIENT_ID,GOOGLE_DEVICE_CLIENT_SECRET` instead
+(only touches those two env entries, triggers its own rollout). **This env.mk gap is pre-existing,
+not introduced this session, and is worth fixing before anyone next runs a full `make setup` from
+that checkout** - flagged here rather than fixed, since reconstructing the missing values wasn't
+this session's task. Built the Cloud image straight from the standalone checkout (`docker image
+build -f infra/cloud/Dockerfile.cloud`, tag `zim95/browseterm-server-cloud:latest`), `k3d image
+import`ed it into `browseterm-k3s` (`IfNotPresent` pull policy on the Deployment means the
+rollout picks up the freshly-imported content under the same tag without a registry push, same
+"no registry push needed" pattern documented in the 2026-08-31 P07 entry below), then ran the
+`kubectl set env` above, which triggered the rollout - confirmed `1/1 Running`, confirmed via
+`kubectl exec ... grep` that the new pod's `oauth_handlers.py` actually contains
+`device_auth_start`/`device_auth_poll` and that `GOOGLE_DEVICE_CLIENT_ID`/`SECRET` are actually
+present in its environment. Then hit both new routes for real over HTTP against
+`http://browseterm.cloud.com:9999`: `POST /auth/device/start` returned a **real** Google
+`user_code`/`verification_uri`/`device_code` (not a mock), and `POST /auth/device/poll` against
+that real `device_code` correctly returned `{"status": "pending"}` - i.e. Google's real
+`authorization_pending` response, mapped correctly.
+
+**Not done this session, left for the user to drive interactively next** (needs a human approving
+a real Google login, which this session can't do): actually launching the Desktop app, clicking
+"Log in", approving the code at `google.com/device` with a real Google account, and confirming the
+app lands on the Device page with a Keychain-stored token - only the Cloud half of that round trip
+has been live-verified so far, not the Desktop-app-in-a-real-WebView half. After that succeeds,
+the user's own stated next step is testing the Cluster section's Setup/Teardown against the
+already-existing live `browseterm-k3s-local` cluster (created in an earlier P07-era session, still
+present - `k3d cluster list` shows it `1/1` right now) - worth noting before clicking Setup that
+this cluster already exists outside of `cluster_manager.py`'s own bookkeeping, so Teardown-then-
+Setup is the more meaningful first test of the button pair, not Setup alone. **Nothing this
+session was committed to git** in either `browseterm-server` or `browseterm-desktop` (per this
+project's "only commit when explicitly asked" convention) - both repos currently have this
+session's changes sitting uncommitted in their standalone `~/browseterm/*` checkouts.
+
+## Where things stand (as of 2026-09-04 — Desktop app's Cluster section built: resource sliders, k3d setup/teardown, pod monitoring)
+**Implemented the resource-allocation UI that `browseterm-desktop/desktop/device_info.py`'s own
+docstring had flagged as a known gap** ("no resource-allocation UI exists yet... offering the
+machine's full detected capacity" as a placeholder) and that
+`FINAL_BROWSETERM_V2_IMPLEMENTATION_PLAN.md` section 9 specs explicitly ("User configures:
+allocated_cpu, allocated_memory_bytes, allocated_storage_bytes... Cloud validates allocation <=
+physical capacity"). Added a **Cluster** section to the Device page, below the existing device-spec
+card, per the user's request: three sliders (CPU cores / Memory GB / Storage GB, bounded by the
+machine's detected totals from `device_info.detect_hardware()`), a single Setup/Teardown button,
+a live status badge, and a polling pod table.
+
+**New `browseterm-desktop/desktop/cluster_manager.py`**: shells out to `k3d`/`docker`/`kubectl`
+(matching this project's existing convention everywhere else — see
+`browseterm-monorepo/SETUP-LOCAL.md` — rather than adding a Kubernetes Python client dependency).
+`create_cluster`/`delete_cluster` target the exact same `browseterm-k3s-local` cluster name and
+`-p "80:80@loadbalancer"` mapping SETUP-LOCAL.md's manual procedure uses, so a cluster created via
+this button is indistinguishable from one a developer creates by hand, and the doc's own manual
+build/deploy steps still work against it unmodified. **Real constraint discovered**: k3d's CLI has
+no per-cluster CPU limit flag at all (only `--servers-memory`/`--agents-memory`, which map straight
+onto the Memory slider) — CPU is capped after cluster creation via `docker update --cpus` on each
+node container (k3d's nodes are plain Docker containers labelled `k3d.cluster=<name>`), applied as
+best-effort (a failure here doesn't tear down an otherwise-successful cluster create, since the
+cluster is already usable regardless of whether the CPU cap itself lands). `list_pods()` uses
+`kubectl --context k3d-browseterm-k3s-local get pods -A -o json`, returning `[]` rather than
+erroring when the cluster doesn't exist yet.
+
+**`desktop/api.py`** gained `cluster_status`/`setup_cluster`/`teardown_cluster`/`list_cluster_pods`.
+Allocation defaults to half of detected capacity the first time the Cluster section is ever read on
+a machine (leaves headroom for the host OS), then persists in `DesktopState`
+(`allocated_cpu`/`allocated_memory_gb`/`allocated_storage_gb`, new fields in
+`desktop/state.py`) — a per-machine preference, deliberately not cleared on logout (only
+`device_id`/`device_name` are), since it's about this Mac's own resource split rather than which
+account is currently signed in. Whether the cluster itself is up is **never cached** — every
+`cluster_status()` call re-checks live via `cluster_manager.cluster_exists()` — so a cluster
+deleted outside the app (e.g. a manual `k3d cluster delete`) is never misreported as still running
+the next time the page loads. On `setup_cluster`, the chosen allocation is also pushed to Cloud via
+the existing `CloudClient.update_device()` (already-existing method, previously unused by this
+app) as a best-effort call — silently skipped if the device isn't yet activated, and a Cloud-side
+failure never blocks the local cluster from coming up, same fail-open pattern already used
+elsewhere in this project (e.g. `resume_container`'s subscription check).
+
+**`device_info.py` changed**: dropped the `allocated_cpu`/`allocated_memory_bytes`/
+`allocated_storage_bytes` keys it used to hardcode to 100% of detected totals — allocation is now a
+stateful user preference assembled in `api.py`, not a hardware-detection concern, so
+`detect_hardware()` returns only the physical totals now.
+
+**UI**: sliders are disabled while the cluster is up (resizing a live k3d cluster's Docker resource
+limits isn't attempted — Setup/Teardown is the only supported transition, matching what the button
+itself implies); the pod table polls `list_cluster_pods()` every 5s only while the cluster exists,
+starting/stopping automatically as Setup/Teardown resolve.
+
+**Tests**: 12 new (`tests/test_cluster_manager.py` mocks `subprocess.run` directly to cover
+`cluster_manager`'s own k3d/docker/kubectl invocations without needing real CLI tools or a real
+cluster; `tests/test_api_cluster.py` mocks `cluster_manager` itself to cover `Api`'s allocation
+defaulting/persistence/Cloud-sync logic in isolation, with `DesktopState.save` monkeypatched to a
+no-op in every test so nothing touches this machine's real `~/.browseterm/desktop_state.json`).
+Full suite: 41/41 passing (`poetry run pytest tests/`).
+
+**Same-session regression found and fixed live: removing `allocated_*` from `detect_hardware()`
+(above) broke first-time login itself.** `desktop/app.py::_run_login_flow` reuses
+`detect_hardware()`'s output directly as the request body for `redeem_device_bootstrap` -->
+Cloud's `POST /devices` (`browseterm-server/src/cloud/device_data_models.py`'s
+`RegisterDeviceRequest`) — and that model declares `allocated_cpu`/`allocated_memory_bytes`/
+`allocated_storage_bytes` as **required**, not optional, so every login attempted after this
+session's earlier edit failed at registration with 3 pydantic "Field required" errors (caught live
+by the user testing a real login, not by the test suite — none of the existing tests exercise
+`redeem_device_bootstrap` through `app.py`'s real code path with real `detect_hardware()` output).
+Fixed by giving `DesktopState` a new `ensure_allocation_defaults(hardware)` method (defaults to
+half of detected capacity and persists, exactly once, the first time either call site needs a
+value — a no-op after that) and having both `app.py`'s new `_registration_payload()` (built
+specifically to fix this) and `api.py`'s `cluster_status()` call it, so the value Cloud registers a
+brand-new device with and the value the Cluster section's sliders first show are guaranteed to be
+the same one, computed in exactly one place (`device_info.default_allocation`, also new). Full
+suite re-run clean after the fix, including one pre-existing test
+(`test_full_desktop_login_flow_round_trip`) whose `detect_hardware()` stub had to be filled out
+with real `total_cpu`/`total_memory_bytes`/`total_storage_bytes` values to match — it had been
+passing before only because nothing downstream previously read those fields.
+
+## Where things stand (as of 2026-09-05, continued — Setup now actually deploys the local stack, not just a bare cluster)
+**Per the user's explicit go-ahead ("Yes I want the setup to actually deploy these. Keep the code
+ready. I will make the changes for the deadlock and we can start")**, built the real deployment
+automation and wired it into the Setup button, so it stands up a genuinely working Local control
+plane rather than an empty cluster. New `browseterm-desktop/desktop/local_stack.py`, called from
+`api.py`'s `setup_cluster` right after `cluster_manager.create_cluster`.
+
+**Did the manifest research first, not from memory** — dispatched a fact-finding fork to read the
+actual `infra/deployment/` manifests, Makefiles, and setup scripts for all 7 components that need
+real deployment (container-maker, socket-ssh, browseterm-server-local, status_monitor, cert-manager,
+reaper, minio — snapshot_job confirmed to need nothing, it's spawned dynamically by container-maker
+as a Job at save-time, no deployment manifest of its own exists), then independently re-verified the
+exact Makefile target names myself before writing any code, since the fork's summary flagged a real
+naming inconsistency worth confirming firsthand: `status_monitor` and `reaper` have **no
+`prod_setup` target at all** — only `dev_setup` (which, despite the name, applies the real
+prod-style `infra/deployment/deployment.yaml`, not a dev manifest).
+
+**Design decision: reuse each repo's own `make prod_setup`/`dev_setup` target via subprocess,
+rather than re-implementing envsubst/kubectl-apply logic in Python.** SETUP-LOCAL.md's own manual
+procedure already *is* these exact make targets — reusing them keeps this module automatically in
+sync with any future change to those scripts, instead of maintaining a second implementation that
+could silently drift. Two real exceptions found and handled: `status_monitor`'s and `reaper`'s own
+`dev_setup` scripts `source env.mk` directly (confirmed by reading both scripts) rather than taking
+values as script arguments, so those two specifically get a real `env.mk` file written into their
+repo checkout before `make dev_setup` runs; every other component's Makefile does `include env.mk`
+too (would hard-error if the file doesn't exist at all) but takes its real values as `make
+VAR=value` command-line overrides instead, so those just get an empty placeholder file touched into
+existence first.
+
+**One real landmine found by actually reading the manifest instead of assuming**: container-maker's
+prod `deployment.yaml` hardcodes `USER_POD_RUNTIME_CLASS=gvisor` as a **literal string**, not an
+envsubst placeholder — correct for the single-node k3s PROD host (`setup.k3s.sh` installs
+`runsc`/registers the RuntimeClass there), but a k3d-in-Docker local cluster has no gVisor
+RuntimeClass at all, so every workspace pod container-maker tried to create would fail to schedule
+with "RuntimeClass not found." Since this can't be overridden via envsubst (it's not a
+`${VAR}`), `local_stack.py` applies a `kubectl patch` immediately after `make prod_setup` to blank
+the value back out — container-maker's own `pod_manager.py` already treats an empty value as "omit
+the field entirely" (`resource_config.py`: `os.getenv(...) or None`), exactly what its own
+dev/docker-desktop manifest already does. Real, deliberate consequence, documented in code: local
+workspace pods run unsandboxed (node-default runc) rather than gVisor-isolated — judged acceptable
+since the local cluster is single-tenant (only the machine's own owner ever uses it), unlike the
+shared PROD cluster this protection actually matters for.
+
+**One value this session's code cannot invent, by design**: `BROWSETERM_CLOUD_INTERNAL_API_TOKEN`
+must be byte-identical to Cloud's own `CLOUD_INTERNAL_API_TOKEN` (SETUP-LOCAL.md step 5's own
+warning, re-confirmed in `browseterm-server-local/infra/deployment/deployment.yaml`'s own inline
+comment — every internal-token-gated Local→Cloud call, i.e. session validate, container CRUD,
+catalog, sse-tokens, silently 401s without it). New `desktop/config.py` entry with no default;
+`local_stack.check_prerequisites()` refuses to deploy anything — checked **before**
+`cluster_manager.create_cluster()` even runs, not after — if it's unset, so a doomed config fails
+in milliseconds instead of after a ~90s cluster-create cycle. The same prerequisite check also
+verifies `/etc/hosts` has both `browseterm.local.com` and `socketssh.local` pointing at 127.0.0.1
+(SETUP-LOCAL.md's own manual step) — checked, never silently written, since editing `/etc/hosts`
+needs `sudo` and this app must never do that unprompted.
+
+**Deploy order implemented exactly as the manifests' own references dictate** (namespace →
+`browseterm-internal-api-token` + placeholder `browseterm-db-credentials` Secrets → minio →
+cert-manager CronJob, triggered once via a one-off `kubectl create job --from=cronjob/` and waited
+on to actually complete, since container-maker's Secret doesn't exist until that job mints it →
+`host.docker.internal`'s IP resolved live via `docker run --rm alpine getent hosts ...` for
+browseterm-server-local's cross-cluster `hostAliases` → container-maker → socket-ssh →
+browseterm-server-local → status_monitor → reaper, the last of which is templated with the real
+`device_id` from `DesktopState`, already known post-login by the time this button is reachable at
+all — resolving reaper's own previously-documented "device doesn't exist yet at deploy time" gap
+for free, simply because deployment now happens *after* login instead of at raw cluster-creation
+time). Every `kubectl create <resource>` uses the same `--dry-run=client -o yaml | kubectl apply
+-f -` idempotent-apply pattern SETUP-LOCAL.md itself already uses for namespace creation (done as
+two chained Python subprocess calls, no shell pipe), so re-clicking Setup against an
+already-partially-deployed cluster is safe, not a duplicate-resource error.
+
+**Known limitation, not fixed this session**: if `local_stack.deploy()` fails partway (e.g. the
+token was wrong), the k3d cluster itself still exists, so the button flips to "Teardown" — there's
+no UI affordance yet to retry just the local-stack deploy without tearing down and recreating the
+whole cluster first (wasteful if e.g. minio/cert-manager already succeeded). The error message does
+surface in the Cluster section's error box either way. `REPO_PASSWORD`/`DOCKER_HUB_REPO_NAME` are
+also new required-if-you-want-Save-to-work config (default blank/`"zim95"`) — same
+already-established project convention of Save failing gracefully without it while the terminal
+itself still works.
+
+**Tests**: 15 new in `tests/test_local_stack.py` — `deploy()`'s own step ordering (mocking each
+internal step function and asserting call order, since mocking every subprocess call across a
+7-component pipeline would be unmaintainable), plus individual coverage of `check_prerequisites`,
+`_make`'s env.mk-touching/variable-passing, `_write_env_mk`, the gvisor-strip patch's exact JSON,
+the cert-manager CronJob trigger-and-wait, and `host.docker.internal` IP resolution — each mocked
+at the `subprocess.run` boundary, same pattern as `test_cluster_manager.py`. `api.py`'s existing
+cluster tests updated with an autouse fixture no-op'ing `local_stack` by default (mirroring how
+`cluster_manager` itself is already mocked there), plus 3 new tests confirming the wiring: deploy
+is called with the real device_id after cluster creation, a prerequisites failure prevents cluster
+creation from being attempted at all, and a deploy failure surfaces in the returned status while
+correctly still reporting the cluster itself as up. Full suite: 74/74 passing.
+
+**Still blocked on, unchanged from the entry above**: none of the three login-deadlock fixes are
+implemented yet — the user is pursuing the OAuth Device Authorization Grant route and is doing the
+Google/GitHub console setup themselves before this resumes.
+
+## Where things stand (as of 2026-09-05 — login/cluster chicken-and-egg surfaced; pod monitor scoped to the real local-stack workloads)
+**The user, testing the Cluster section above, spotted a real, pre-existing architectural deadlock
+this feature only made visible, not one it introduced.** Login requires Local
+(`browseterm-server-local`, which serves `/login`) to be reachable
+(`desktop/app.py::_backend_reachable`/`_resolve_start_kwargs`) — but Local has no standalone run
+mode; per `SETUP-LOCAL.md` it only ever runs as a Kubernetes Deployment inside the very
+`browseterm-k3s-local` cluster the new Setup button creates, and that button only lives on the
+post-login Device page. No cluster → Local unreachable → can't log in → can't reach the button
+that creates the cluster. Worse than that on closer trace: even the *redirect callback* after a
+successful Google/GitHub OAuth currently depends on Local's own `/auth/callback` recognizing the
+desktop-port cookie and bouncing the system browser to the loopback server (`app.py`'s module
+docstring) — so Local sits in the login critical path twice over, not just for serving the initial
+page.
+
+**Discussed three ways to break the cycle, nothing implemented yet pending the user's choice**:
+(1) add a "bootstrap Local" action to the existing pre-login connection-error page that runs the
+k3d-create + deploy steps before login, so the Cluster section stays post-login as a
+monitoring/reconfig panel; (2) decouple Local's own web server from Kubernetes entirely (run it as
+a plain process/container the desktop app launches directly, reserving k3d purely for workspace
+pods, matching `newplan.md`'s flow diagram more literally); (3) switch login itself to the OAuth
+**Device Authorization Grant** (RFC 8628 — the `gh auth login`/`docker login` pattern: a
+`user_code` + a generic verification URL, no redirect URI, no loopback server at all), which would
+remove Local from the login path entirely since the desktop app would talk only to Cloud (and
+Google/GitHub) to authenticate. **User is pursuing option 3**: registering a new Google OAuth
+client of type "TVs and Limited Input devices" (device flow isn't available on the existing Web
+application client type — a genuinely separate client_id/secret) and enabling GitHub's "Device
+Flow" toggle on the existing OAuth App (no new GitHub app needed, same client_id). Not yet
+implemented on either the Cloud or Desktop side — blocked on the user completing that console
+setup first.
+
+**Pod monitor scoped down to only the real local-stack workloads, per the user's explicit list**:
+container-maker, socket-ssh, browseterm-server-local, status_monitor, cert-manager, reaper,
+snapshot_job, minio, ingress-nginx — not k3s/k3d's own system pods (coredns, svclb-*,
+local-path-provisioner, etc.) that would otherwise dominate a freshly created cluster's pod list.
+Dispatched a research pass across all 9 components' actual manifests first rather than guessing
+naming conventions, which surfaced two real wrinkles: container-maker/socket-ssh/
+browseterm-server-local each exist as *either* a bare-named Deployment (prod-style manifest) or a
+`-development`-suffixed one (dev-style manifest) depending on which was actually applied to a given
+cluster (confirmed both variants are live possibilities — `SETUP-LOCAL.md` itself documents using
+the *prod-style* manifest for browseterm-server-local specifically, to avoid its dev manifest's
+`HOST_DIR` hostPath requirement); and cert-manager/reaper are CronJobs whose spawned Job pods carry
+no `app`-style label at all. Implemented as a pod-name PREFIX match (`desktop/cluster_manager.py`'s
+new `MONITORED_WORKLOAD_PREFIXES`) rather than a namespace or label selector, since a bare prefix
+like `"browseterm-server"` matches both naming variants without needing to know which one is
+actually deployed, and also matches label-less CronJob pods. Also confirmed for the user, by
+reading the actual code rather than assuming: pod monitoring is plain `subprocess.run` calls to the
+`kubectl`/`k3d`/`docker` CLIs (no `kubernetes` Python client dependency, no `Popen`/streaming) —
+`list_cluster_pods()` does one fresh `kubectl get pods -A -o json` per call, polled every 5s from
+`app.js`'s `setInterval`, nothing persistent or watched.
+
+**Tests**: 15 new/changed in `tests/test_cluster_manager.py` — the pre-existing
+`test_list_pods_parses_ready_and_restart_counts` no longer asserts a `kube-system` pod passes
+through (it must now be filtered), a new test asserts k3s system pods are excluded while a
+`-development`-suffixed pod passes, and a parametrized test locks in that every one of the 9
+components' real naming variants (bare and `-development`, plus CronJob-spawned job-pod names)
+matches `MONITORED_WORKLOAD_PREFIXES`. Full suite: 56/56 passing.
+
+**Not done / explicitly out of scope this session**: whether "Setup" should now actually deploy
+these 9 components (not just create the bare k3d cluster it does today) is an open question raised
+by the user's message but not yet confirmed as in-scope — flagged back to them rather than assumed,
+since automating that is a much larger lift (per-component env.mk/secrets, image build/import, and
+a real apply ordering — postgres/redis → minio → cert-manager → container-maker → payment-gateway
+→ socket-ssh → browseterm-server-local → status_monitor/reaper/snapshot_job cronjobs, per
+`SETUP-LOCAL.md`'s own "Next: bringing up the rest" section) than the filtering/monitoring work
+done this session. Also not done: any of the three login-deadlock fixes above (blocked on the
+user's Google/GitHub console setup for option 3).
+
+**Not done / explicitly out of scope this session (2026-09-04 entry)**: Setup only creates the bare k3d cluster, not
+the full local stack (`container-maker`/`socket-ssh`/`payment-gateway`/`browseterm_workload`) —
+SETUP-LOCAL.md's own "Next: bringing up the rest" section already documents that as a separate,
+not-yet-automated, multi-repo manual process, and the user's ask was specifically "setup the local
+k3d cluster," not "deploy the whole app." Not live-verified against a real k3d/docker install this
+session (no cluster was actually created/torn down) — the next real test is clicking Setup for real
+and confirming `k3d cluster list`/`docker ps`/the pod table all agree.
+
 ## Where things stand (as of 2026-08-30 — hibernate/resume/reaper status confirmed via code; payment-gateway architecture documented; capacity-measurement methodology written up in cost.md)
 **Answered a round of user questions about hibernate/resume/reaper by re-reading the actual code**
 (not from memory of this file's own summary — this file's account, and the underlying repos, had
