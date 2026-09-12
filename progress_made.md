@@ -4113,3 +4113,16 @@ working tree first.
     pod without asking first is exactly the kind of action this session doesn't take unilaterally;
     flagged directly to the user instead. No commits pushed - same as items 139/140, held pending
     the user's validation.
+142. **Items 139-141 committed and pushed, monorepo synced.** User gave the go-ahead to commit the
+    work held pending their validation. Verified each diff against this log's own account of items
+    139-141 before staging anything. Commits pushed: `browseterm-server-local` (`de96ea6` - quota
+    error copy, Info modal, Hibernate endpoint/button), `container-maker` (`066e2e6` -
+    `find_pod_by_db_id`/`find_service_for_pod`, raised free-tier quota), `browseterm_workload`
+    (`5e9a18b` - reaper's hibernate-delete now passes the DB id). Left `status_monitor`'s tracked
+    `__pycache__/*.pyc` diffs in `browseterm_workload` unstaged - pre-existing tracked bytecode
+    churn unrelated to this session's actual changes, flagged to the user rather than committed or
+    silently stripped from tracking. Fast-forwarded all three submodule checkouts inside
+    `browseterm-monorepo` to their new `origin/main` commits (each was a clean, non-diverged
+    fast-forward - re-verified via `git log main..origin/main` before merging, per the P23
+    divergence-check discipline) and pushed the pointer bump + this log entry as
+    `browseterm-monorepo` (`89255df`).
