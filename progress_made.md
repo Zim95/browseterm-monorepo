@@ -3983,3 +3983,133 @@ validated end-to-end)
     project - this migration is correct and ready, not yet exercised end to end through a real
     save. Commits pushed: `browseterm-server` (`8912fea`), `container-maker` (`229c044`),
     `browseterm-monorepo` (`07baaa4`, submodule sync).
+
+## What we did today (2026-09-11 — browseterm-ui-plan.md implemented: quota bug root-caused, Info + Hibernate buttons)
+
+User handed over `~/browseterm/browseterm-ui-plan.md` (three asks) and asked for it to be
+implemented, with this log updated once ready for their own validation pass - nothing in this
+section has been committed/pushed yet, deliberately, so their review happens against the actual
+working tree first.
+
+139. **Plan item 1 — "still says exceeded your plan's quota" on create, root-caused.** Not a
+    reverted subscription check (the earlier device-quota migration already fully removed
+    `is_user_within_container_limit` from the create path, in both Local and Cloud - re-audited
+    both and confirmed clean). The real cause: `container-maker`'s per-user-namespace Kubernetes
+    `ResourceQuota`/`LimitRange` (`user_namespace_quota.yaml`, applied once at namespace creation
+    and never revisited since) is driven by a `tier` string that has **no gRPC field to ever set
+    it at all** - every namespace this project has ever created was silently pinned to the
+    `"free"` tier's numbers forever (2 CPU / 2Gi memory / 4 pods total, 1 CPU per container max),
+    sized as a billing tier's cheapest plan back when subscriptions gated things, not as the
+    generous safety ceiling it needs to be now that Cloud's own device-capacity check
+    (`allocated - used`) is the real, intended gate. A legitimately-sized request Cloud approves
+    can still get rejected by this independent, much smaller K8s-level ceiling underneath it -
+    exactly the reported symptom. Confirmed live, not just in theory: the one real per-user
+    namespace in `browseterm-k3s-local` already had `limits.cpu` sitting at `2/2` (fully consumed
+    by its two existing test pods) - the next container create would have failed with this exact
+    error right now, no further pods needed to reproduce it. Fixed at the source
+    (`container-maker/src/resources/resource_config.py`'s `TIERS["free"]`, raised to 16/32 CPU
+    request/limit, 16/64Gi memory, 200Gi storage, 12 pods, 8 PVCs, 8 CPU / 32Gi per-container max -
+    `"pro"` is dead code with no caller able to select it, left as-is) and **also live-patched**
+    the already-existing namespace's `ResourceQuota`/`LimitRange` directly (safe and immediate per
+    the manifest's own documented increase-only-takes-effect-immediately semantics - no pod
+    eviction risk), so the fix isn't waiting on a namespace that already exists to somehow get
+    recreated. Separately fixed the actually-misleading part of the symptom:
+    `browseterm-server-local/src/common/utils.py`'s `clean_k8s_error_message` translated ANY
+    K8s "exceeded quota" error - including this one - into "You've reached your plan's resource
+    limit... upgrade your plan," copy that's actively wrong now that subscriptions are disabled;
+    changed to "This device doesn't have enough remaining capacity for this terminal..." (three
+    existing tests asserting on the old copy updated to match, not weakened). Also corrected a
+    stale doc comment in `app.py` that claimed `create_container` still had plan-gating logic.
+    `browseterm-server-local`: 135/135 (2 tests updated). `container-maker`: 59/59 unit
+    (unaffected - the changed tests only assert `TIERS["free"]` compares consistently against
+    itself, not literal numbers). Image rebuilt (`--no-cache`), `k3d image import`'d, rolled out to
+    `browseterm-k3s-local`, confirmed live via `kubectl exec ... grep` (new error copy present, old
+    "upgrade your plan" text gone) before considering it done.
+140. **Plan items 2 & 3 — Terminal Info button + manual Hibernate button.** New `Info` button
+    (every non-loading terminal state) opens a modal showing the container's real resource limits,
+    IP/ports, status, and created/last-saved timestamps - wired to the existing, previously
+    entirely unused `GET /get-container-info/{id}` endpoint (`api_handlers.get_container_info`
+    already existed and already returned everything needed; nothing on the read side had to
+    change). New `Hibernate` button (RUNNING containers only) is the manual counterpart to
+    `reaper`'s own automatic idle-hibernation - new `POST /hibernate-container`
+    (`browseterm-server-local/src/api_handlers.py`) reuses `reaper.py`'s exact safety-critical
+    ordering: trigger a real save -> poll until `save_status` reaches a CONFIRMED `Succeeded` (a
+    `Failed` or timed-out save must never lead to deleting the pod - matches reaper's own rule
+    verbatim, same as its existing test suite for resume enforces for a different flow) -> delete
+    the pod -> Cloud's existing compound hibernate transition (`CloudClient().hibernate_container`,
+    the same one P19's resume-rollback path already reuses). Synchronous like `resume_container`,
+    not backgrounded like `save_container` alone - a failed save here never changes the
+    container's own `status`, so there's no SSE event a frontend could wait on for that outcome;
+    the frontend instead shows a per-row "Hibernating..." loading state (`hibernatingIds`, mirrors
+    the existing `pendingContainers` pattern for creation) for the duration of its own request. On
+    success, the container's `status` flips to `HIBERNATED` via Cloud's ordinary write path, so
+    the existing generic SSE `status_change` handling already re-renders the row correctly with no
+    new event type needed. New `tests/integration/containers/test_hibernate_container.py` (10
+    tests): happy path, exact save-then-delete-then-hibernate call ordering (mocked-manager
+    pattern, mirrors `test_resume_calls_cloud_before_recreate`), 404/409s (missing container,
+    not-RUNNING, no-`kubernetes_id`), a confirmed-FAILED save leaving the pod running, a save that
+    never reaches any terminal state within the (patched-tiny-for-the-test) wait window, and
+    ownership scoping. `browseterm-server-local`: 135/135 overall. Image rebuilt/redeployed to
+    `browseterm-k3s-local` alongside item 139's fix (same rebuild), confirmed live via
+    `kubectl exec ... grep` that `/hibernate-container` is actually registered in the running
+    pod's `app.py`. Not yet exercised through the real browser UI end to end (clicking Info/
+    Hibernate against a real running terminal) - left for the user's own validation pass, as
+    requested. No commits pushed anywhere in this session's work (139 or 140) - held pending that
+    validation.
+141. **Follow-up to item 139 - delete was silently no-op'ing, the real driver of the quota
+    exhaustion.** User's own instinct, asked directly: "check if delete works as usual, because
+    if delete did not work, that would explain the resource crunch." It didn't. Live proof found
+    with zero destructive action: cross-referencing the one real per-user namespace's live pods
+    against Postgres's `containers` table turned up a pod (`namah-ssh-ubuntu-test-2-pod-...`,
+    `Running`, still consuming its share of the namespace's CPU/memory quota) with **no matching
+    DB row at all** - its row had been hard-deleted, but the pod was never actually removed from
+    Kubernetes. Root cause: `container-maker`'s `delete()` (`KubernetesContainerHelper.check_pod`)
+    resolved the pod to remove by comparing the caller-supplied `container_id` against the pod's
+    own live Kubernetes UID - and every caller across the whole project (Local's
+    `handleDelete`/`cleanupFailedContainer`/the k8s-creation-failure rollback, this session's own
+    new `hibernate_container`, and `reaper`'s automatic idle-hibernation) was supplying the DB
+    row's **cached** `kubernetes_id` for that, which is the exact same "historically unreliable...
+    can be wrong from creation or stale after a pod is recreated" value `save()`'s own docstring
+    already flagged and was fixed to stop trusting, two P-items ago, for the *save* path only -
+    delete never got the equivalent fix. Worse: on no match, the old code silently skipped
+    `delete_pod` entirely and still returned `{'status': 'Deleted'}` - no exception, no error, the
+    DB row genuinely gone, everyone (UI, logs, the user) believing the delete fully succeeded
+    while the pod quietly kept running and kept counting against the namespace's `ResourceQuota`
+    forever. This is what actually exhausts a namespace's ceiling over time regardless of how
+    generous item 139 made the numbers - the leak just takes longer to hit a bigger ceiling.
+    Confirmed the mechanism directly and safely (no deletion attempted): exec'd into the live
+    `container-maker` pod and read the orphan's own `browseterm/container-id` label
+    (`600eca8e-1010-44b3-ab3e-91edf748c56b`) - it matches no row in Postgres at all, while the
+    OTHER live pod's same label correctly matches the one surviving row's own id
+    (`db9b600e-79e1-4c98-b352-bcb85c20e1ba`), proving the label itself is exactly the reliable,
+    permanent identifier this needed all along. Fixed by making `delete()` resolve the pod the
+    same principled way `save()` already does - just keyed on a label instead of a DB read, and
+    genuinely simpler than save() because of it: new `KubernetesContainerHelper.find_pod_by_db_id`
+    matches on the pod's own `browseterm/container-id` label (stamped from the DB id at BOTH
+    create and resume time, so it's stable across a pod recreate in a way neither the cached
+    `kubernetes_id` nor even the pod's own generated *name* are), needing no Cloud round-trip at
+    all - which matters here specifically because Local's own delete flow deletes the DB row
+    *before* the background k8s cleanup call, so by the time `delete()` runs the row may already
+    be gone; a DB-lookup-based fix (mirroring save()'s own approach literally) would not have
+    worked for this call path. New `find_service_for_pod` resolves the associated Service from the
+    pod it just found (reusing the pod<->service relationship `ServiceManager` already computes
+    for every service's own `associated_resources`) instead of a second independent id guess.
+    `delete()`'s `container_id` now means the same thing `save()`'s already does - the DB id, not
+    a Kubernetes UID - so every caller of the `deleteContainer` RPC across the whole project had
+    to move in lockstep: `browseterm-server-local` (3 frontend call sites in `terminals.js`, the
+    `delete_container_in_k8s` handler's comment, and this session's own `hibernate_container`) and
+    `browseterm_workload/reaper` (`reaper.py`'s own hibernate-delete call, whose docstring
+    previously documented the now-reversed convention as correct - including its own prior
+    real-bug story, both rewritten to match). `container-maker`: 69/69 (10 new unit tests -
+    `tests/k8s/integration/containers/test_delete_container.py`'s three cluster-only integration
+    tests updated to match, not runnable locally since `KubernetesResourceManager` only supports
+    `load_incluster_config`). `browseterm-server-local`: 136/136 (1 new regression test on
+    `hibernate_container`). `reaper`: 16/16 (its own dedicated regression test flipped to assert
+    the corrected direction; still not live-deployed anywhere in this project, per every prior
+    P-item touching it). Both `container-maker` and `browseterm-server-local` rebuilt (`--no-cache`)
+    and redeployed to `browseterm-k3s-local` alongside item 139/140's images. The live orphan pod
+    itself was deliberately left untouched - it has no DB row, so nothing in the app can reach it
+    to clean it up through the normal flow, and deleting a live, possibly-still-wanted terminal
+    pod without asking first is exactly the kind of action this session doesn't take unilaterally;
+    flagged directly to the user instead. No commits pushed - same as items 139/140, held pending
+    the user's validation.
