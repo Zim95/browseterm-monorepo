@@ -4162,3 +4162,20 @@ working tree first.
     Submodule pointers updated for `browseterm-db` and `browseterm-server` (both changed this
     session); three new submodules added for the three new repos above
     (`browseterm-device-control-spec`, `browseterm-device-agent`, `browseterm-marketing`).
+144. **Fixed a real Cloudflare deployment bug in `browseterm-marketing`, reported by the owner
+    after deploying it themselves.** The deployment was using the repository root as its
+    static-assets directory, so the deploy log uploaded `.git`, `.wrangler`, `README.md`,
+    `LICENSE` and everything else in the repo alongside the actual site - traced directly to this
+    project's own README, which had documented Cloudflare Pages' "Build output directory: /
+    (repository root)" for this repo. Fixed in `browseterm-marketing` (`ac8334e`): every website
+    file (`index.html`, `faq.html`, `security.html`, `install/`, `assets/`, plus `_headers`/
+    `_redirects`, needed for the CSP to keep applying) moved into a new `public/` directory;
+    `wrangler.jsonc` added pinning `assets.directory` to `./public` so the bug is structurally
+    impossible to reintroduce, not just fixed once; `.wrangler/` added to `.gitignore`; README's
+    deploy instructions rewritten to match (Workers static assets via `wrangler deploy`, not the
+    old Pages Git-connect flow). Verified locally via `wrangler deploy --dry-run` that only the 11
+    files under `public/` are ever read - this session has no Cloudflare credentials at all, so
+    the actual redeploy and live 404 checks on `/.git/config` and `/README.md` are the owner's own
+    follow-up, not done here. Full detail in `~/browseterm/BROWSETERM_MIGRATION_PROGRESS.md`'s
+    "PART 2 — Cloudflare deployment fix" addendum. Submodule pointer for `browseterm-marketing`
+    bumped and pushed as `browseterm-monorepo` (`7cdd7db`).
