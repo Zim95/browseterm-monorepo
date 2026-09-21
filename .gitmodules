@@ -40,3 +40,12 @@
 [submodule "browseterm-desktop"]
 	path = browseterm-desktop
 	url = https://github.com/Zim95/browseterm-desktop.git
+[submodule "browseterm-device-control-spec"]
+	path = browseterm-device-control-spec
+	url = https://github.com/Zim95/browseterm-device-control-spec.git
+[submodule "browseterm-device-agent"]
+	path = browseterm-device-agent
+	url = https://github.com/Zim95/browseterm-device-agent.git
+[submodule "browseterm-marketing"]
+	path = browseterm-marketing
+	url = https://github.com/Zim95/browseterm-marketing.git

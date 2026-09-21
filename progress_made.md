@@ -4126,3 +4126,39 @@ working tree first.
     fast-forward - re-verified via `git log main..origin/main` before merging, per the P23
     divergence-check discipline) and pushed the pointer bump + this log entry as
     `browseterm-monorepo` (`89255df`).
+143. **Started the Cloud Control Plane migration** (`~/browseterm/BROWSETERM_CLOUD_CONTROL_PLANE_MIGRATION.md`,
+    a new, separate, much larger architecture doc from the owner - not a continuation of the P-item
+    numbering above). Full part-by-part detail lives in `~/browseterm/BROWSETERM_MIGRATION_PROGRESS.md`
+    at the workspace root (that file, not this log, is now the authoritative day-to-day tracker for
+    this migration - only a summary lands here). Baseline audit (Part 0) found this migration
+    substantially overlaps prior work above: device registration, OAuth device-linking, per-device
+    Bearer tokens, container CRUD/resume with CAS, and SSE already exist, all over REST/polling
+    rather than the new doc's gRPC bidirectional-stream design - the actual gap was gRPC transport,
+    a durable command table, and a real headless Device Agent, not the whole system from scratch.
+    Completed this session, each with its own tests (all passing, no regressions in any touched
+    repo) and pushed to `origin/main`: Part 1 (durable `device_commands`/`device_credentials`
+    tables, atomic device activation, quota-reservation and conditional-container-update
+    invariants - `browseterm-db`), Part 2 (new public `browseterm-marketing` static site, built by
+    a forked subagent), Part 5 (new `browseterm-device-control-spec` repo - the versioned
+    Device Control + LocalDeviceAgent protobuf contracts), Part 6 (Cloud's own gRPC server,
+    `browseterm-server/grpc_server.py` - deployed as a separate process from the HTTP service),
+    Part 7 (new `browseterm-device-agent` repo - the headless local service that is now the sole
+    local-to-Cloud communication boundary), Parts 8-11 (CREATE/DELETE/HIBERNATE/RESUME wired
+    end-to-end, feature-flagged off by default in `browseterm-server` so the pre-existing
+    synchronous paths are untouched until each flag is deliberately enabled), most of Part 12
+    (Device Agent's private local API server exists and Cloud handles what it forwards, but
+    status_monitor/reaper/snapshot_job/tunnel_registrar themselves are NOT yet rewired to call it -
+    real remaining gap, not yet closed), and Part 14 (startup-based active-device activation over
+    the gRPC stream, additive alongside the pre-existing REST heartbeat path).
+    Explicitly NOT attempted, and why: Part 20 (Contabo deployment) and any DNS change - the doc
+    itself requires the owner's direct authorization for both, never assumed. Parts 16-18
+    (macOS/Windows/Linux runtime installers) - code not written this session; the doc explicitly
+    requires real-hardware verification before any of it can be called done, which this session
+    cannot perform. Part 19 (registry credentials) - the doc forbids inventing registry
+    credentials or accounts. Part 21 (removing the old Local UI) - correctly blocked on Part 20
+    actually being live first. Part 13 (Socket-SSH cutover) and Part 3/4 (moving the browser UI
+    onto Cloud) - not started; Part 4's OAuth device-linking flow already substantially exists
+    from prior work per the Part 0 audit above, so that part is smaller than the doc assumes.
+    Submodule pointers updated for `browseterm-db` and `browseterm-server` (both changed this
+    session); three new submodules added for the three new repos above
+    (`browseterm-device-control-spec`, `browseterm-device-agent`, `browseterm-marketing`).
