@@ -4378,3 +4378,67 @@ working tree first.
     new dependencies this part actually added. Full detail in
     `~/browseterm/BROWSETERM_MIGRATION_PROGRESS.md`'s new "PART 13" section (Part 12's own section
     updated to reflect its `socket-ssh` deferral now being closed).
+151. **Deployed Part 13 to Contabo, found and fixed a real load-bearing gVisor gap in the
+    Multipass rebuild, then completed Part 19 (single-repo snapshot registry).** Owner asked to
+    deploy Part 13's code and continue into Parts 17-19.
+    - **Contabo**: rebuilt+redeployed `browseterm-server-cloud` from `e1c1b47` (the placement-
+      generation ticket fix) - clean rollout, `/healthz` OK. `socket-ssh` was NOT part of this
+      deploy (it's a local component, never runs on Contabo).
+    - **gVisor for the Multipass rebuild** (`browseterm-desktop` `d94ee7f`): while investigating
+      the owner's "network policies... internet access... we solved this before" point, found the
+      project's actual old pre-migration single-node-k3s reference setup
+      (`scripts/setup.k3s.sh`/`scripts/deploy.k3s.sh`/`00_docs/k3s_single_node.md`) and compared it
+      against item 149's Multipass rebuild - NetworkPolicy CIDRs already matched k3s's real values
+      by default (no porting needed), but gVisor was never carried over, and this is not a
+      hardening gap: `container-maker`'s manifest hardcodes `runtimeClassName: gvisor`
+      unconditionally on every user pod, so on a fresh Multipass VM every terminal a user created
+      would hang Pending forever - the RuntimeClass never existed and runsc was never installed.
+      Fixed: `cluster_manager._install_gvisor` (mirrors setup.k3s.sh's own block), `_install_k3s`
+      now also disables k3s's bundled Traefik/servicelb (verified nothing in the local stack needs
+      a LoadBalancer Service), `local_stack._deploy_gvisor_runtimeclass` applies the RuntimeClass
+      object. Also fixed a real regression while there: `local_stack._deploy_socket_ssh` still
+      passed the `BROWSETERM_CLOUD_API_URL`/`CLOUD_INGRESS_HOST(_IP)` args Part 13 already removed
+      from socket-ssh's own Makefile - would have broken the next real deploy attempt outright.
+      Deliberately did NOT port ingress-nginx/MetalLB back - verified no Service anywhere in the
+      current local stack is `type: LoadBalancer`. 80/80 tests.
+    - **Discovered and reconciled a dual-checkout situation on this machine**: this session's work
+      happens in `~/projects/browseterm/browseterm-monorepo` (git submodules), but
+      `browseterm-desktop`'s own `LOCAL_STACK_REPOS_DIR` default points at flat sibling clones
+      under `~/browseterm/<repo>` - the real path a running Desktop app would deploy from. Synced
+      `~/browseterm/browseterm-server`/`socket-ssh`/`browseterm-desktop` (fast-forward pulls) after
+      pushing, and will keep doing so after future work in this checkout - flagged to the owner
+      directly rather than silently assumed.
+    - **Part 19 (registry)**: owner specified the exact scheme - single private Docker Hub repo
+      `zim95/browseterm` (not one repo per user/container, which the prior "P17"-era
+      implementation had chosen and which would have meant unbounded private-repo sprawl), tags
+      formatted `u_<user_id>_c_<container_id>_v_<version>` (immutable, never "latest"), complete
+      reference stored with its digest when available. `browseterm-db` (`3356487`): new
+      `container_snapshots.image_tag` column, migration verified upgrade/downgrade/re-upgrade
+      clean against the full real 24-revision history on a disposable Postgres (also caught and
+      fixed, before it did any damage: a revision-ID collision between the new migration file and
+      an already-existing one, `e1f2a3b4c5d6`, surfaced by running `init.py` - which turned out to
+      be a destructive squash-all-migrations tool, not a safe test harness; every deleted file was
+      an uncommitted working-tree change, restored via `git checkout` before anything was lost).
+      `browseterm-server` (`2b975fe`, `b130717`): `SNAPSHOT_REGISTRY_REPO_PREFIX` now means the
+      fixed repo itself (default `zim95/browseterm`), `allocate_snapshot` computes and stores
+      `image_tag`; also updated `cloud-setup.sh`/`cloud-setup-vps.sh`'s own positional-arg default
+      so a future re-run can't silently revert the live deployment to the old per-tenant scheme.
+      `browseterm_workload` (`a2ca1e7`): `snapshot_job` tags/pushes using the new scheme and now
+      reports a digest-qualified reference (`repo:tag@sha256:...`) to Cloud when available,
+      falling back to tag-only otherwise - confirmed safe downstream: Resume/Container Maker/K8s
+      all treat `saved_image` as an opaque pull reference already, and `repo:tag@digest` is valid
+      OCI/Docker/Kubernetes reference syntax needing no parsing changes anywhere.
+      Applied the new migration to prod (pg_dump backup first, one-off Job, same established
+      pattern as every prior migration), patched the live Deployment's
+      `SNAPSHOT_REGISTRY_REPO_PREFIX` to `zim95/browseterm` (rebuilt image otherwise would have
+      still used the old value from the Deployment's own env, since it was explicitly set there,
+      not just defaulted), rebuilt+redeployed `browseterm-server-cloud` from `b130717` - confirmed
+      live via `kubectl get deploy ... -o jsonpath` and a clean `/healthz`.
+      `snapshot_job`'s own image is not part of any Contabo deployment - it's a local component
+      (container-maker spawns it as a Job on the user's own machine), so this only takes effect
+      once a real local stack is deployed there (still hardware-gated, same as everything else
+      downstream of Parts 16-18).
+    - **Parts 17/18 not attempted this session in the form originally asked** - see the owner's own
+      follow-up choice (Part 18 lives inside `browseterm-desktop`, not a new repo) for what comes
+      next; Part 17 (Windows) has no path forward without real Windows hardware, which does not
+      exist in this environment - reported as a blocker rather than writing unverifiable code.
