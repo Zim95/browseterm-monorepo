@@ -4179,3 +4179,85 @@ working tree first.
     follow-up, not done here. Full detail in `~/browseterm/BROWSETERM_MIGRATION_PROGRESS.md`'s
     "PART 2 — Cloudflare deployment fix" addendum. Submodule pointer for `browseterm-marketing`
     bumped and pushed as `browseterm-monorepo` (`7cdd7db`).
+145. **Redesigned `browseterm-marketing`'s theme to match the actual Browseterm Cloud app**, per
+    the owner's `uispec.md` (white background, mint-green/blue-violet palette pulled directly from
+    `browseterm-server-local/templates/static/css` rather than invented), plus a new hero tagline
+    and closing callout carrying the owner's cloud-workspaces motivation copy. `browseterm-marketing`
+    (`b4bef71`); submodule pointer synced as `browseterm-monorepo` (`33bde9e`).
+146. **Real production deployment - the Contabo cluster went from completely unreachable to
+    actually running the migration's Cloud stack.** The owner gave SSH access
+    (`deploy@100.86.120.79`/`puhtaeto-prod`, passwordless root via `sudo`) and confirmed DNS was
+    live for both public hostnames, then asked which migration parts that newly unblocks. Verifying
+    before touching anything found the real state was worse than "DNS is live" suggested:
+    `app.browseterm.puhtaeto.com` resolved but had no matching Traefik ingress (404 on a
+    self-signed cert), and `api.browseterm.puhtaeto.com` - the host the one running pod was
+    actually configured for - no longer resolved in DNS at all. Net effect: Cloud was unreachable
+    from either hostname when this started. The running pod was also 8 commits behind
+    `browseterm-server`'s `origin/main` (predated Parts 6/7-11/12/14 entirely), no
+    `browseterm-control-grpc` deployment existed, and `browseterm-db`'s migrations had never been
+    applied to prod Postgres (`alembic_version` was 3 revisions behind head - `device_commands`,
+    `device_credentials`, `placement_generation`, the NOTIFY trigger, `container_config_json` all
+    missing). One thing was already right: `browseterm` has its own separate database/user on the
+    shared Postgres instance, not sharing `ikompare`'s credentials.
+    Given the owner's explicit go-ahead for the full push: rebuilt+redeployed `browseterm-server-cloud`
+    from current `origin/main`, cut the ingress over to `app.browseterm.puhtaeto.com` (cert-manager
+    reissued the Let's Encrypt cert automatically), took a `pg_dump` safety-net backup and then
+    applied the pending migrations via a one-off Kubernetes Job, deployed `browseterm-control-grpc`
+    (Part 6's server, ClusterIP-only - no public gRPC ingress yet since no real Device Agent exists
+    anywhere to test it against), and flipped `DEVICE_COMMAND_CREATE/DELETE/HIBERNATE/RESUME_ENABLED`
+    to true (verified first this was safe: the old flag-off path never called Container Maker at
+    all, just wrote an orphaned DB row nothing would ever act on - not a regression against
+    anything that actually worked). Verified end to end:
+    `https://app.browseterm.puhtaeto.com/healthz` returns 200 with a real Let's Encrypt cert.
+    Owner action still required: Google/GitHub OAuth console redirect URIs need updating to the
+    `app.browseterm.puhtaeto.com` host or login will 401/mismatch - flagged, not something reachable
+    from `kubectl`/SSH. Full detail in `~/browseterm/BROWSETERM_MIGRATION_PROGRESS.md`'s "PART 20"
+    section (marked partial - registry/HA/observability/backup-schedule still open).
+147. **Found and emergency-mitigated a real data-loss bug in the just-enabled Hibernate path,
+    then fixed it properly and shipped Save as a first-class feature alongside it.** While
+    investigating why a Part 3 fork had dropped the browser's "Save Session" button (the owner
+    firmly corrected that drop - "Save is one of the biggest features of reliability... we cannot
+    drop it" - see the new pinned-equivalent memory `browseterm-save-is-core-feature.md`), an
+    investigation fork found Container Maker's `saveContainer` RPC does not block on the snapshot
+    actually finishing - it creates a Kubernetes Job and returns immediately with a *predicted*
+    image name, not a confirmation. `browseterm-device-agent`'s `hibernate.py` (already deployed,
+    with `DEVICE_COMMAND_HIBERNATE_ENABLED` live in prod per item 146) was deleting the pod on that
+    unconfirmed RPC return - a real risk of destroying a customer's pod before its data was
+    actually saved. Immediately set `DEVICE_COMMAND_HIBERNATE_ENABLED=false` in prod by hand as a
+    stopgap (Create/Delete/Resume unaffected - no real Device Agent had executed a live Hibernate
+    yet, so nothing was actually lost) before any code fix existed.
+    Fix (survived two mid-task interruptions - an account usage-limit cutoff and the machine
+    sleeping mid-response - re-verified fresh at completion rather than trusting pre-interruption
+    state): new shared `device_agent/commands/save_execution.py::perform_save()` triggers the
+    snapshot then polls a new Cloud endpoint (backed by the same `container_snapshots` row
+    `snapshot_job` already reports to) until confirmed `Succeeded`/`Failed`/timeout - never trusts
+    the RPC's immediate response. Per the owner's explicit direction ("Save needs to work the same
+    way other commands do... send a command to the device agent"; "can hibernate reuse the code
+    from save rather than reimplement it?"), both the fixed `hibernate.py` and the new `save.py`
+    call this one shared function - `hibernate.py` only deletes the pod + releases quota on a
+    confirmed-succeeded outcome, using the real reported image name; `save.py` never touches the
+    pod or quota regardless of outcome. `SAVE` is wired as a first-class Device Command end to end
+    (proto enum, `browseterm-db` migration, Device Agent handler/dispatch, Cloud endpoint,
+    `container_mutation.py`, new `DEVICE_COMMAND_SAVE_ENABLED` flag defaulting false, browser
+    button), mirroring Create/Delete/Hibernate/Resume's shape at every layer - also caught
+    `servicer.py`'s command-delivery map having no `"Save"` entry, which would have silently
+    stranded every SAVE command in Postgres, never delivered over the control stream.
+    Alongside this, Part 12 was finished (`status_monitor`/`reaper`/`snapshot_job`/`tunnel_registrar`
+    rewired off `CLOUD_INTERNAL_API_TOKEN` onto Device Agent's local API - `snapshot_job` deliberately
+    kept its direct Cloud calls for `allocate_snapshot`/`report_snapshot_result`, which need to write
+    fields `ReportSnapshotProgress` has no room for; `socket-ssh` deferred to Part 13 since it has no
+    gRPC tooling yet) and Part 3 (browser UI - login/terminals/profile/devices - moved from
+    `browseterm-server-local` to Cloud, with a real trust-model fix: the new browser routes derive
+    `user_id` only from the validated session cookie rather than trusting a body-supplied value).
+    All committed and pushed: `browseterm_workload` (`ffa9ef6`), `socket-ssh` (`8bb2473`),
+    `browseterm-device-agent` (`dcef9df`), `browseterm-db` (`f248a7d`),
+    `browseterm-device-control-spec` (`abb775c`), `browseterm-server` (`4dd7f2b`); submodule
+    pointers synced as `browseterm-monorepo` (`9bf3726`).
+    **Important gap for whoever picks this up next: none of this item's code is deployed to prod
+    yet** - item 146's deployment ran from `browseterm-server`'s `origin/main` at `0e3cb8a` (Part
+    14), before any of this item's commits existed. Prod is still running that older image.
+    `DEVICE_COMMAND_HIBERNATE_ENABLED` must stay `false` in prod until a fresh
+    rebuild+redeploy actually carries this item's fix - re-enabling it against the currently-deployed
+    image would re-introduce the exact bug just found. `browseterm-db`'s new SAVE migration
+    (`d8e9f0a1b2c3`) is also not yet applied to prod. Full detail (including the corrected Part 10
+    write-up and new SAVE addendum) in `~/browseterm/BROWSETERM_MIGRATION_PROGRESS.md`.
