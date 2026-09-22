@@ -4442,3 +4442,27 @@ working tree first.
       follow-up choice (Part 18 lives inside `browseterm-desktop`, not a new repo) for what comes
       next; Part 17 (Windows) has no path forward without real Windows hardware, which does not
       exist in this environment - reported as a blocker rather than writing unverifiable code.
+152. **Built Part 18 (headless Linux CLI + native k3s) inside `browseterm-desktop`**
+    (`browseterm-desktop` `48df320`), per the owner's own choice between a new dedicated repo and
+    reusing existing code - reuse won. New `desktop/native_k3s.py` installs k3s directly on the
+    host (no Multipass VM) using the identical install flags and the exact same vendored gVisor
+    script `cluster_manager.py`'s Multipass path already uses (imported directly, not
+    duplicated), and deliberately reuses `cluster_manager.KUBE_CONTEXT`'s own string value rather
+    than inventing a new context name - this is what actually lets `local_stack.py` work against
+    either backend with zero changes, not just a description of the intent. New
+    `desktop/linux_credential_store.py` (root-owned 0600 file - the doc's own documented Linux
+    fallback, since `keyring`'s Secret Service backend needs a desktop session/D-Bus daemon a
+    headless server doesn't have) and a Linux hardware-detection path in `desktop/device_info.py`
+    (`/proc/meminfo`, `os.cpu_count()`, dispatched by `sys.platform` alongside the existing macOS
+    `sysctl` path). New `desktop/cli.py`: `setup/start/stop/status/logs/configure/activate/repair/
+    diagnostics/uninstall`. `setup` runs the identical headless OAuth Device Authorization Grant
+    the GUI's own login already uses (`cloud_client.start_device_login`/`poll_device_login`,
+    reused completely unchanged) the first time no device credential is stored. 126/126 tests
+    (46 new), same fake-command-runner discipline `cluster_manager.py`'s own tests already
+    established - genuinely the right testing bar here, not a compromise, since there's no real
+    Linux/systemd host in this environment to test against either (same practical constraint as
+    Part 17's Windows blocker). Not yet run against a real Linux machine - left as the owner's own
+    hands-on checkpoint, same posture as the still-untouched Multipass VM one from item 149.
+    Part 17 (Windows): reported as a hard blocker, not attempted - no Windows machine reachable at
+    all in this environment, and unlike Part 18, nothing there is even syntax-checkable without one.
+    Full detail in `~/browseterm/BROWSETERM_MIGRATION_PROGRESS.md`'s new Part 18/Part 17 sections.
