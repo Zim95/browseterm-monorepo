@@ -4261,3 +4261,72 @@ working tree first.
     image would re-introduce the exact bug just found. `browseterm-db`'s new SAVE migration
     (`d8e9f0a1b2c3`) is also not yet applied to prod. Full detail (including the corrected Part 10
     write-up and new SAVE addendum) in `~/browseterm/BROWSETERM_MIGRATION_PROGRESS.md`.
+148. **Deployed item 147's work to prod for real, then fixed two UI bugs the owner found by
+    actually using the live site.** The owner wired up Google's OAuth console redirect URI and
+    asked whether anything was pending that needed it - yes: prod was still running the pre-Part-3
+    image (`0e3cb8a`), so there was no real `/login` page to exercise the callback against at all.
+    Rebuilt+redeployed `browseterm-server-cloud` from current `origin/main` (`4dd7f2b`); it
+    crash-looped on the first attempt (`AssertionError: jinja2 must be installed to use
+    Jinja2Templates` - Part 3 reintroduced `Jinja2Templates` but never re-added the `jinja2`
+    dependency P06 had trimmed out; passed the implementing fork's own local tests only because
+    something in that environment already had it installed outside the declared dependency set).
+    Fixed (`browseterm-server` `8423a63`), rebuilt, redeployed clean. Applied the SAVE migration
+    (`d8e9f0a1b2c3`) to prod too, with a fresh `pg_dump` backup first. `DEVICE_COMMAND_HIBERNATE_ENABLED`/
+    `DEVICE_COMMAND_SAVE_ENABLED` deliberately left off per the owner's own choice - ships the code,
+    no new lifecycle behavior live yet. Verified end to end: `/login` renders with real Google/GitHub
+    buttons wired to `target=cloud`, protected routes correctly redirect when unauthenticated.
+    - Owner then found two real bugs by using the live site: the Play button was disabled with no
+      visible explanation (the `title` tooltip was already in the code, but a `disabled` button
+      doesn't reliably fire hover in every browser, which native tooltips depend on - fixed by
+      wrapping it in an always-hoverable `<span>`), and the Save button was on the terminals-list
+      container card when it was only ever supposed to be on the individual terminal page. Moved
+      the actual `POST /app/containers/{id}/save` trigger from `terminals.js`'s card (deleted
+      entirely there - button markup, handler, in-flight state, dead CSS) onto `terminalpage.html`'s
+      header (new button, wired in `terminalpage.js`), leaving only the existing read-only
+      save-status widget where it was. `browseterm-server` (`01a96b2`).
+149. **Rebuilt `browseterm-desktop` from a k3d-based interactive GUI app into a real Multipass+k3s
+    local execution plane with a background daemon**, in two forked phases, after the owner asked
+    directly whether Device Agent's reconnect-after-sleep design and a real local setup flow could
+    be built now - unlike Parts 16-18's original hardware blocker, this machine actually has
+    Multipass installed and is real hardware to build and test against.
+    - **Phase 1** (`browseterm-desktop` `a65f369`): `cluster_manager.py` rewritten from `k3d`
+      (Docker containers - always the dev-only shortcut) to real `multipass launch` + in-VM k3s,
+      with the resulting kubeconfig merged into `~/.kube/config` as its own `browseterm` context
+      (every "default"-named field renamed first, so it can't collide with Docker Desktop/Colima's
+      own "default" context). `local_stack.py` rewritten to deploy the actual current stack instead
+      of the pre-migration one it predated (which deployed `browseterm-server` locally and used a
+      global `CLOUD_INTERNAL_API_TOKEN` for everything) - namespace/secrets -> MinIO -> cert-manager
+      -> Container Maker -> `browseterm-device-agent` (had no build/deploy tooling at all until this
+      phase; also needed an RBAC Role/RoleBinding it was missing, since it reads Container Maker's
+      certs live via the k8s API) -> status-monitor -> reaper -> Socket-SSH+tunnel-registrar sidecar,
+      each step verified against that component's own actual current manifest, not assumed from the
+      stale `deploy.k3s.sh` reference script. Device Agent's credential comes from this app's own
+      Keychain, written into a k8s Secret at deploy time. `ingress-nginx` dropped entirely - verified
+      nothing routes through it now that ngrok is the real exposure path. Both `create_cluster()`
+      and `deploy()` gained an `on_step(name, status, detail)` progress callback, not consumed by
+      anything yet at this point. 57/57 tests. Found and worked around (not fixed) a real bug in
+      `container-maker`'s own `Makefile`: `prod_setup` silently drops 2 of 11 args its script
+      accepts.
+    - **Phase 2** (`browseterm-desktop` `2814d53`): new headless `desktop/daemon.py`
+      (`daemond.py` entrypoint) - the device heartbeat moved here from `app.py` (deleted there
+      entirely, so the GUI and daemon can't heartbeat independently and race each other) plus a new
+      60s health-check loop: `cluster_manager.vm_state()` -> `start_vm()` if the Multipass VM isn't
+      `Running` (the actual "Mac slept, Multipass stopped the VM" recovery - Device Agent's own gRPC
+      reconnect backoff, already built in Part 7, handles the rest once its pod is running again),
+      then `list_pods()`/`restart_pod()` for anything genuinely crashing. New
+      `packaging/com.browseterm.daemon.plist` `launchd` LaunchAgent template
+      (`RunAtLoad`+`KeepAlive`) with install/uninstall commands documented in README - deliberately
+      not run for real. Phase 1's `on_step` callback now reaches the GUI's WebView live via
+      `evaluate_js` (the same mechanism the existing login-code display already used) - a real
+      step-by-step Setup progress UI, building rows dynamically rather than hardcoding Phase 1's
+      step list. 74/74 tests (57 + 17 new).
+    - Both phases: no real Multipass VM created, no `launchctl load` run, nothing touching real
+      infrastructure - every test mocks `subprocess`/`multipass exec`, matching this repo's existing
+      convention. Committed and pushed (`a65f369`, `2814d53`); submodule pointers synced as
+      `browseterm-monorepo` (`bd6f727`, `5d16acc`) - `browseterm-desktop` had actually never been
+      initialized as a submodule in this monorepo checkout at all before this session (empty
+      directory; `git submodule update --init` fixed it), a pre-existing gap unrelated to this
+      session's own changes but only just found and closed here.
+    - **Real remaining checkpoint, explicitly not done and not to be done without the owner
+      present**: actually creating the Multipass VM, running Setup for real, and registering the
+      `launchd` daemon. Everything above is built and unit-tested against mocks only.
