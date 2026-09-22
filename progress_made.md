@@ -4330,3 +4330,51 @@ working tree first.
     - **Real remaining checkpoint, explicitly not done and not to be done without the owner
       present**: actually creating the Multipass VM, running Setup for real, and registering the
       `launchd` daemon. Everything above is built and unit-tested against mocks only.
+150. **Completed Part 13's core cutover (Socket-SSH/terminal ticket) and, alongside it, found and
+    fixed a real ticket-staleness gap in `browseterm-server`.** Part 12 had deliberately deferred
+    `socket-ssh` (the last local component still holding a Cloud credential directly - its own
+    `DEVICE_TOKEN`, called against Cloud's `/internal/terminal-tickets/consume`) because Device
+    Agent's `ConsumeTerminalTicket` RPC and its NetworkPolicy allowlist for `socket-ssh` had
+    already been built ahead of time during Part 12, but `socket-ssh` itself had no gRPC client
+    tooling at all. Before touching `socket-ssh`, re-reading `consume_terminal_session` for this
+    part found it never re-verified that a ticket's container was still actually assigned to the
+    device redeeming it, nor that its placement generation hadn't changed, within the ticket's 30s
+    TTL - exactly the "stale generation" class of bug every other command/result path in this
+    migration had already been hardened against, just missed here. Fixed
+    (`browseterm-server` `e1c1b47`): `TicketData` now carries `placement_generation`, bound at
+    issuance and re-checked at redemption against the container's live row; both ticket-issuing
+    call sites needed the fix (`terminal_handlers.create_terminal_session` and
+    `browser_handlers.terminal_session`, which duplicates the same logic rather than calling the
+    former - found by grepping every `create_ticket(` call site, not assuming there was only one).
+    Also refreshed `poetry.lock`'s `browseterm-db`/`browseterm-device-control-spec` git pins, found
+    stale (predating their own already-merged SAVE support) while getting a clean baseline in a
+    fresh `poetry install` - real, needed for a next fresh checkout to even collect its own tests,
+    not a behavior change.
+    `socket-ssh` (`73cd10b`): new `src/device_agent_client.js` calls
+    `LocalDeviceAgent.ConsumeTerminalTicket` over the same plaintext, ClusterIP-only gRPC trust
+    boundary every other Device Agent local-API caller uses, loading a vendored copy of
+    `browseterm-device-control-spec`'s `local_device_agent.proto` via `@grpc/proto-loader` at
+    runtime (Node has no equivalent of the Python side's pregenerated `*_pb2.py` step, so a vendored
+    copy was simpler than a new cross-language build step for one small, rarely-changing file).
+    `src/authenticate.js`'s public interface is unchanged, so `server.js` needed no changes at all.
+    `DEVICE_TOKEN`/`BROWSETERM_CLOUD_API_URL` removed everywhere (Secret mount, both deployment
+    manifests, Makefile, setup scripts, README), replaced by `DEVICE_AGENT_LOCAL_API_URL`; the prod
+    manifest's single-Mac `hostAliases` workaround is gone too, since there's no Cloud hostname left
+    for this service to resolve.
+    Tests: `browseterm-server` 358/358 (348 pre-existing + 10 new/adjusted). `socket-ssh` 16/16
+    across the four unaffected suites - `authenticate.test.js` rewritten to mock the new client;
+    new `device_agent_client.test.js` deliberately exercises a real gRPC round trip against an
+    in-process fake `LocalDeviceAgent` server rather than a fully-mocked stub, so a proto-loader/
+    schema mistake would actually be caught. `tests/ssh.test.js` remains a pre-existing, unrelated
+    environmental failure (missing `@kubernetes/client-node` devDependency for its own mock).
+    Committed and pushed: `browseterm-server` (`e1c1b47`), `socket-ssh` (`73cd10b`).
+    **Not deployed anywhere real yet** - both need a fresh image build+rollout to Contabo, and
+    there's still no real Device Agent connected there to exercise this against end-to-end (same
+    standing blocker as everything downstream of Parts 16-18). Known, documented gaps left for
+    later: no connection/rate limiting added (pre-existing, Part 23 territory); tickets bind
+    placement generation but deliberately not tunnel generation (the ticket's own WSS URL already
+    makes a stale tunnel fail at the ngrok/DNS layer, so no live gap was found to justify it); a
+    `npm install` lockfile refresh surfaced pre-existing `npm audit` findings unrelated to the two
+    new dependencies this part actually added. Full detail in
+    `~/browseterm/BROWSETERM_MIGRATION_PROGRESS.md`'s new "PART 13" section (Part 12's own section
+    updated to reflect its `socket-ssh` deferral now being closed).
