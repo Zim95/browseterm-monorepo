@@ -50,8 +50,23 @@ spec:
     spec:
       containers:
       - name: minio
-        image: quay.io/minio/minio:latest
+        # quay.io/minio/minio:latest now returns 401 Unauthorized even for anonymous manifest
+        # reads (confirmed 2026-09-25 - MinIO gated their official quay.io images behind auth;
+        # Docker Hub's minio/minio was already gone entirely per this file's own history). Using
+        # Bitnami's legacy free-tier mirror instead - it deliberately keeps the exact same
+        # MINIO_ROOT_USER/MINIO_ROOT_PASSWORD env vars and `server ... --console-address` CLI as
+        # upstream, so nothing else in this manifest needs to change. Pinned to a real tag, not
+        # :latest, since bitnamilegacy is itself a frozen/legacy catalog (no new "latest" is
+        # coming) - a moving target here would gain nothing and only risks another silent break.
+        image: bitnamilegacy/minio:2025.7.23-debian-12-r5
         args: ["server", "/data", "--console-address", ":9001"]
+        # Bitnami images run as a non-root UID by default (1001), unlike the official
+        # quay.io/minio/minio image this replaced (which ran as root) - the existing minio-pvc's
+        # on-disk data is root-owned from that image, so the Bitnami entrypoint's own non-root
+        # user gets "file access denied" writing to /data/.minio.sys/tmp. Forcing root here
+        # matches the original image's behavior exactly, no PVC ownership change needed.
+        securityContext:
+          runAsUser: 0
         env:
         - name: MINIO_ROOT_USER
           valueFrom:
@@ -119,7 +134,9 @@ spec:
       restartPolicy: OnFailure
       containers:
       - name: createbucket
-        image: quay.io/minio/mc:latest
+        # Same reason as the minio Deployment's own image comment above - quay.io/minio/mc now
+        # 401s too.
+        image: bitnamilegacy/minio-client:2025.7.21-debian-12-r3
         env:
         - name: MINIO_ROOT_USER
           valueFrom:
