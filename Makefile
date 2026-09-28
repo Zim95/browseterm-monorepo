@@ -20,15 +20,15 @@ gen_env:          ## regenerate each submodule's env.mk/.env from the aggregated
 	./scripts/gen-env.sh
 
 observability:    ## deploy the log stack (Loki + Alloy + Grafana) into the observability namespace
-	kubectl apply -f 02_cluster_infra/loki.yaml
-	kubectl apply -f 02_cluster_infra/alloy.yaml
-	kubectl apply -f 02_cluster_infra/grafana.yaml
+	kubectl apply -f ../puhtaeto_infra/cluster/manifests/loki.yaml
+	kubectl apply -f ../puhtaeto_infra/cluster/manifests/alloy.yaml
+	kubectl apply -f ../puhtaeto_infra/cluster/manifests/grafana.yaml
 
 observability_teardown:  ## remove the observability stack (Loki/Alloy/Grafana + its namespace)
 	kubectl delete namespace observability --ignore-not-found
 
 letsencrypt_issuer: ## apply the production Let's Encrypt ClusterIssuers (needs official cert-manager + a public domain)
-	kubectl apply -f 02_cluster_infra/letsencrypt-issuer.yaml
+	kubectl apply -f ../puhtaeto_infra/cluster/manifests/letsencrypt-issuer.yaml
 
 detect_language:
 	python 01_language_detection/generate_language_representation.py

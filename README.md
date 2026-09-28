@@ -103,7 +103,7 @@ There are **two** ways to run BrowseTerm, and they are different deployments:
 ### A. Single-node k3s (current / prod-parity) — recommended
 Runs the **PROD flow** (built images from the registry, real entrypoints, no hostPath) on a real,
 NetworkPolicy-**enforcing** cluster — the same single-node k3s locally and in prod (self-owned VM /
-Raspberry Pi). This replaced docker-desktop. Full rationale + gotchas: **`00_docs/k3s_single_node.md`**.
+Raspberry Pi). This replaced docker-desktop. Full rationale + gotchas: **`../puhtaeto_infra/cluster/docs/k3s_single_node.md`**.
 
 ```bash
 cp env.mk.example env.mk        # set REPO_PASSWORD + OAuth secrets; METALLB_POOL on the VM subnet (192.168.64.x); REDIS_DATA_DIR absolute (/data)
@@ -136,7 +136,7 @@ does and to troubleshoot.
 
 This is the **actual, end-to-end local dev setup** on Docker Desktop's built-in Kubernetes, in the order you run it, with the reasoning behind each step. Each service also has its own README with the full `env.mk` reference — this guide ties them together.
 
-> **Cluster note:** These steps target **Docker Desktop**. The project's other docs (`00_docs/multipass_cluster.md`) describe a Multipass/k3s cluster; a few values differ between the two environments and are called out below (MetalLB pool, local access). The canonical shared values used here:
+> **Cluster note:** These steps target **Docker Desktop**. The project's other docs (`../puhtaeto_infra/cluster/docs/multipass_cluster.md`) describe a Multipass/k3s cluster; a few values differ between the two environments and are called out below (MetalLB pool, local access). The canonical shared values used here:
 > - **Namespace:** `browseterm`
 > - **Docker Hub user (image registry):** `zim95`
 > - **Postgres:** `browseterm-pg-service:5432` (user `browseterm`, db `browseterm`)
@@ -198,7 +198,7 @@ spec:
   - first-pool
 EOF
 ```
-> ⚠️ **Docker Desktop caveat:** the committed `02_cluster_infra/metallb-config.yaml` uses `192.168.64.x` — that's for the **Multipass** cluster. On Docker Desktop the node is on `192.168.65.x`, so use the pool above. **Also:** MetalLB's L2 IPs live inside the Docker Desktop VM network and are **not reachable from your Mac host** (a `curl`/`ping` to `192.168.65.200` from macOS times out). They *are* reachable in-cluster (which is what the per-container services need, since socket-ssh dials them internally). For reaching the app **from your Mac browser**, we use loopback aliases + port-forward instead — see §11. (On Multipass, the node IPs are host-reachable, so there MetalLB serves the browser directly.)
+> ⚠️ **Docker Desktop caveat:** the committed `../puhtaeto_infra/cluster/manifests/metallb-config.yaml` uses `192.168.64.x` — that's for the **Multipass** cluster. On Docker Desktop the node is on `192.168.65.x`, so use the pool above. **Also:** MetalLB's L2 IPs live inside the Docker Desktop VM network and are **not reachable from your Mac host** (a `curl`/`ping` to `192.168.65.200` from macOS times out). They *are* reachable in-cluster (which is what the per-container services need, since socket-ssh dials them internally). For reaching the app **from your Mac browser**, we use loopback aliases + port-forward instead — see §11. (On Multipass, the node IPs are host-reachable, so there MetalLB serves the browser directly.)
 
 ## 5. Snapshot storage — MinIO only (no PVC)
 *The container "save" flow uploads a container's filesystem tarball to **MinIO** (object storage); the snapshot Job then reads it from there. The old shared RWX **PVC** path is retired — there is no `snapshot-pvc.yaml` step anymore. MinIO is applied as part of the "Cluster infra" step, and `STORAGE_LAYER` defaults to `minio` everywhere.*
@@ -333,7 +333,7 @@ kubectl get pods -n browseterm      # all should be Running
 ```
 
 ## 11. Local access from your Mac (loopback aliases + /etc/hosts + port-forward)
-*Why this and not the ingress: as noted in §4, on Docker Desktop the MetalLB/ingress IPs aren't reachable from macOS. The working local model (`00_docs/local_ip_setup.md`) is to create **loopback alias IPs** on your Mac, map friendly hostnames to them, and `kubectl port-forward` each service onto its alias. Using hostnames (not raw IPs) matters because the browser must connect by name — that's what the ingress routes on in prod and what the TLS cert's SAN matches.*
+*Why this and not the ingress: as noted in §4, on Docker Desktop the MetalLB/ingress IPs aren't reachable from macOS. The working local model (`../puhtaeto_infra/cluster/docs/local_ip_setup.md`) is to create **loopback alias IPs** on your Mac, map friendly hostnames to them, and `kubectl port-forward` each service onto its alias. Using hostnames (not raw IPs) matters because the browser must connect by name — that's what the ingress routes on in prod and what the TLS cert's SAN matches.*
 
 Run these in your **own Terminal** (sudo needs an interactive prompt):
 ```bash
@@ -365,7 +365,7 @@ With placeholder values, Google returns **`Error 401: invalid_client` / "The OAu
 ## TLS / WSS / Let's Encrypt — why local is `ws://` and prod is `wss://`
 - The browser talks to socket-ssh over a WebSocket. When the page is served over **HTTPS**, browsers require **WSS** (secure WebSocket) with a **browser-trusted** certificate — a self-signed cert is rejected outright and you can't "proceed anyway" for a socket.
 - **Locally** (this guide) the page is served over **HTTP** via port-forward, so plain **`ws://`** is allowed and no certificate is needed. This is the intended local dev model.
-- **In production**, the page is HTTPS and you need a real cert. That's what `02_cluster_infra/letsencrypt-issuer.yaml` is for — two `ClusterIssuer`s using an HTTP-01 solver over nginx. **It requires the official (jetstack) cert-manager and a real, publicly-resolvable domain** — Let's Encrypt's servers must reach your ingress over the internet to validate. It therefore **cannot** issue for a local-only host like `browseterm.local.com` (that's the `invalid`/challenge-failure you hit trying it locally). TLS is terminated at the ingress; socket-ssh itself stays plain `ws://` behind it.
+- **In production**, the page is HTTPS and you need a real cert. That's what `../puhtaeto_infra/cluster/manifests/letsencrypt-issuer.yaml` is for — two `ClusterIssuer`s using an HTTP-01 solver over nginx. **It requires the official (jetstack) cert-manager and a real, publicly-resolvable domain** — Let's Encrypt's servers must reach your ingress over the internet to validate. It therefore **cannot** issue for a local-only host like `browseterm.local.com` (that's the `invalid`/challenge-failure you hit trying it locally). TLS is terminated at the ingress; socket-ssh itself stays plain `ws://` behind it.
 - If you want **WSS locally** (to mirror prod), use **`mkcert`** (a locally-trusted CA) to issue certs for `browseterm.local.com`/`socketssh.local`, add a `tls:` block to the ingresses, and switch the page + `SOCKET_SSH_WSS_URL` to HTTPS/`wss://`. Let's Encrypt stays for real deployments.
 
 ## Teardown
@@ -414,7 +414,7 @@ CI (GitHub Actions, per-repo, on push) will run these suites — see `TODOPLAN.m
 Every service emits **structured JSON logs to stdout** (Python via a shared `logging_setup`,
 socket-ssh via `pino`), each line tagged with a `request_id` correlation id that's threaded across
 services (HTTP → gRPC metadata `x-request-id` → snapshot-Job `REQUEST_ID` env). The stack that
-collects and views them lives in `02_cluster_infra/` and runs in its own `observability` namespace:
+collects and views them lives in `../puhtaeto_infra/cluster/manifests/` and runs in its own `observability` namespace:
 
 - **Loki** (`loki.yaml`) — log store, single-binary, filesystem PVC (dev). ⚠️ For prod, swap to S3
   against the existing MinIO (see the comment in `loki.yaml`).

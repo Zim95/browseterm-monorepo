@@ -23,7 +23,7 @@ step "Namespace"; kubectl create namespace "$NS" 2>/dev/null || echo "  exists"
 step "gVisor RuntimeClass (maps name 'gvisor' → node's runsc handler; user pods opt in via runtimeClassName)"
 # Cluster-scoped, so no namespace. Node-side runsc is installed by setup.k3s.sh; this is the k8s
 # object that makes container-maker's USER_POD_RUNTIME_CLASS=gvisor resolvable.
-kubectl apply -f 02_cluster_infra/gvisor-runtimeclass.yaml
+kubectl apply -f ../puhtaeto_infra/cluster/manifests/gvisor-runtimeclass.yaml
 
 step "ingress-nginx"; kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.11.2/deploy/static/provider/cloud/deploy.yaml
 kubectl -n ingress-nginx rollout status deploy/ingress-nginx-controller --timeout=180s
@@ -44,7 +44,7 @@ spec: { ipAddressPools: [first-pool] }
 EOF
 
 step "MinIO (object storage — no snapshot PVC; local storage retired)"
-kubectl apply -f 02_cluster_infra/minio.yaml
+kubectl apply -f ../puhtaeto_infra/cluster/manifests/minio.yaml
 
 step "Postgres"; make -C postgres_ha dev_pg_single_setup
 kubectl wait --for=condition=ready pod/browseterm-pg -n "$NS" --timeout=150s

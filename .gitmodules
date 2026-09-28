@@ -4,18 +4,12 @@
 [submodule "container-maker-spec"]
 	path = container-maker-spec
 	url = https://github.com/Zim95/container-maker-spec.git
-[submodule "postgres_ha"]
-	path = postgres_ha
-	url = https://github.com/Zim95/postgres_ha.git
 [submodule "browseterm-db"]
 	path = browseterm-db
 	url = https://github.com/Zim95/browseterm-db.git
 [submodule "browseterm-dockerfiles"]
 	path = browseterm-dockerfiles
 	url = https://github.com/Zim95/browseterm-dockerfiles
-[submodule "redis_ha"]
-	path = redis_ha
-	url = https://github.com/Zim95/redis_ha
 [submodule "browseterm-storage"]
 	path = browseterm-storage
 	url = https://github.com/Zim95/browseterm-storage.git
