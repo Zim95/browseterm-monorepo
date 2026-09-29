@@ -60,7 +60,7 @@ EOF
 
 step "Cluster infra: MinIO (object storage for snapshots)"
 # Local PVC snapshot storage is retired — snapshots always live in MinIO now.
-kubectl apply -f ../puhtaeto_infra/cluster/manifests/minio.yaml
+kubectl apply -f ../puhtaeto_infra/cluster/k3s/minio.yaml
 
 step "Postgres (postgres_ha)"
 make -C postgres_ha dev_pg_single_setup
@@ -147,7 +147,7 @@ echo "✅ Deploy complete. Pods:"
 kubectl get pods -n "${NS}"
 cat <<EOF
 
-Next (manual, needs sudo — see ../puhtaeto_infra/cluster/docs/local_ip_setup.md):
+Next (manual, needs sudo — see ../puhtaeto_infra/cluster/docker-desktop/local_ip_setup.md):
   sudo ifconfig lo0 alias 192.168.0.3
   sudo ifconfig lo0 alias 192.168.0.4
   sudo sh -c 'printf "192.168.0.3\t${INGRESS_HOST}\n192.168.0.4\t${SOCKET_SSH_HOST}\n" >> /etc/hosts'
