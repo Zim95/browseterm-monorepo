@@ -3,9 +3,9 @@
 # at it.
 
 observability:    ## deploy the log stack (Loki + Alloy + Grafana) into the observability namespace
-	kubectl apply -f ../puhtaeto_infra/cluster/k3s/loki.yaml
-	kubectl apply -f ../puhtaeto_infra/cluster/k3s/alloy.yaml
-	kubectl apply -f ../puhtaeto_infra/cluster/k3s/grafana.yaml
+	kubectl apply -f ../puhtaeto_infra/observability/loki.yaml
+	kubectl apply -f ../puhtaeto_infra/observability/alloy.yaml
+	kubectl apply -f ../puhtaeto_infra/observability/grafana.yaml
 
 observability_teardown:  ## remove the observability stack (Loki/Alloy/Grafana + its namespace)
 	kubectl delete namespace observability --ignore-not-found
